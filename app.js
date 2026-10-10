@@ -3,7 +3,7 @@
   'use strict';
   var CFG = window.CONFIG, VERSION = 'F1';
   var S = { ses: null, vista: 'login', datos: null, tab: null, zona: null, adminTab: 'avance', usuarios: null, historial: null,
-            informe: null, ocupado: false, online: navigator.onLine, aviso: '', filtroHist: '' };
+            informe: null, ocupado: false, lentos: 0, errCarga: '', online: navigator.onLine, aviso: '', filtroHist: '' };
   var $app = document.getElementById('app'), $capa = document.getElementById('capa'), $aviso = document.getElementById('aviso');
 
   // ---------- utilidades ----------
@@ -23,14 +23,19 @@
   function toast(msg) {
     $aviso.textContent = msg; $aviso.className = 'on'; clearTimeout(toast.t); toast.t = setTimeout(function () { $aviso.className = ''; }, 3600);
   }
-  function cargando() { return '<div class="centro"><span class="cargando" role="img" aria-label="Cargando"></span><div style="margin-top:10px">Cargando…</div></div>'; }
+  function cargando() {
+    if (S.errCarga) return '<div class="vacio"><h2>No se pudo conectar</h2><p>' + esc(S.errCarga) + '</p><button class="btn rel" data-a="recargar">Reintentar</button></div>';
+    return '<div class="centro"><span class="cargando" role="img" aria-label="Cargando"></span><div style="margin-top:10px">Cargando…</div></div>'; }
   function esActivo(v) { return v === true || String(v).toLowerCase() === 'true'; }
 
   // ---------- comunicación con el servicio ----------
   var LECTURAS = { yo: 1, listarUnidades: 1, listarUsuarios: 1, historial: 1, validarDatos: 1 };
+  var ESPERAS = [2000, 4000, 8000];            // pausas entre reintentos de lecturas (servidor dormido o celular sin red aún)
   function espera(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
-  // Reintenta una vez: si el servidor dijo "ocupado" (no ejecutó nada, es seguro) o si una lectura no llegó.
-  function api(accion, p, intento) {
+  function pintarEstado() { var e = document.getElementById('estado'); if (e) e.className = S.lentos > 0 ? 'on' : ''; }
+  // Una petición. Reintenta sola: "ocupado" (el servidor no hizo nada, es seguro) y lecturas que no llegaron.
+  // Las escrituras que no llegan NO se repiten a ciegas: podrían haberse hecho ya.
+  function intento(accion, p, n) {
     var body = { accion: accion, token: S.ses ? S.ses.token : undefined };
     for (var k in (p || {})) body[k] = p[k];
     var ctl = ('AbortController' in window) ? new AbortController() : null, to = setTimeout(function () { if (ctl) ctl.abort(); }, 30000);
@@ -38,15 +43,21 @@
       .then(function (r) { return r.json(); })
       .then(function (j) {
         clearTimeout(to); S.online = true;
-        if (j && j.error === 'ocupado' && !intento) return espera(1500).then(function () { return api(accion, p, 1); });
+        if (j && j.error === 'ocupado' && n < 2) return espera(1500 * (n + 1)).then(function () { return intento(accion, p, n + 1); });
         if (j && accion !== 'login' && (j.error === 'sin_sesion' || j.error === 'sesion_vencida' || j.error === 'inactivo')) { salirLocal(j.mensaje); }
         return j || { ok: false, mensaje: 'Respuesta vacía.' };
       })
       .catch(function () {
         clearTimeout(to);
-        if (LECTURAS[accion] && !intento) return espera(1500).then(function () { return api(accion, p, 1); });
+        if (LECTURAS[accion] && n < ESPERAS.length) return espera(ESPERAS[n]).then(function () { return intento(accion, p, n + 1); });
         S.online = false; return { ok: false, error: 'red', mensaje: 'Sin conexión con el servidor. Revisa tu señal e inténtalo otra vez.' };
       });
+  }
+  // Si tarda más de 4 s, avisa "Conectando…" en vez de dejar la pantalla muda.
+  function api(accion, p) {
+    var visible = false, t = setTimeout(function () { visible = true; S.lentos++; pintarEstado(); }, 4000);
+    function fin() { clearTimeout(t); if (visible) { S.lentos--; pintarEstado(); } }
+    return intento(accion, p, 0).then(function (r) { fin(); return r; }, function (e) { fin(); throw e; });
   }
   // Bloquea el botón y muestra qué está pasando mientras el servidor responde (evita dobles toques).
   function ocupar(b, txt) { if (!b) return; b.disabled = true; b.dataset.txt = b.textContent; b.textContent = txt; }
@@ -55,7 +66,7 @@
   // ---------- sesión ----------
   function guardarSesion() { ls('ses', S.ses ? JSON.stringify(S.ses) : null); }
   function salirLocal(msg) {
-    S.ses = null; S.datos = null; S.usuarios = null; S.historial = null; S.informe = null; guardarSesion();
+    S.ses = null; S.errCarga = ''; S.datos = null; S.usuarios = null; S.historial = null; S.informe = null; guardarSesion();
     S.vista = 'login'; S.aviso = msg || ''; cerrarModal(); render();
   }
   function entrar() {
@@ -66,8 +77,14 @@
 
   // ---------- carga de datos ----------
   function cargarUnidades(silencioso) {
+    var estabaOn = S.online;
     return api('listarUnidades').then(function (r) {
-      if (!r.ok) { if (!silencioso) toast(r.mensaje || 'No se pudo cargar.'); return r; }
+      if (!r.ok) {
+        if (!S.datos) { S.errCarga = r.mensaje || 'No se pudo cargar.'; render(); }
+        else { if (!silencioso) toast(r.mensaje || 'No se pudo cargar.'); if (estabaOn !== S.online) renderConScroll(); }
+        return r;
+      }
+      S.errCarga = '';
       var antes = JSON.stringify(S.datos); S.datos = r;
       if (antes !== JSON.stringify(r) || !silencioso) renderConScroll();
       return r;
@@ -76,13 +93,13 @@
   function cargarSegunVista(silencioso) {
     if (!S.ses || S.vista !== 'home') return;
     if (S.ses.rol === 'administrador') {
-      if (S.adminTab === 'usuarios') return api('listarUsuarios').then(function (r) { if (r.ok) { S.usuarios = r.usuarios; renderConScroll(); } else toast(r.mensaje); });
+      if (S.adminTab === 'usuarios') return api('listarUsuarios').then(function (r) { if (r.ok) { S.errCarga = ''; S.usuarios = r.usuarios; renderConScroll(); } else if (!S.usuarios) { S.errCarga = r.mensaje; render(); } else toast(r.mensaje); });
       if (S.adminTab === 'historial') return buscarHistorial();
     }
     return cargarUnidades(silencioso);
   }
   function buscarHistorial() {
-    return api('historial', { filtro: S.filtroHist }).then(function (r) { if (r.ok) { S.historial = r.eventos; renderConScroll(); } else toast(r.mensaje); });
+    return api('historial', { filtro: S.filtroHist }).then(function (r) { if (r.ok) { S.errCarga = ''; S.historial = r.eventos; renderConScroll(); } else if (!S.historial) { S.errCarga = r.mensaje; render(); } else toast(r.mensaje); });
   }
 
   // ---------- piezas de pantalla ----------
@@ -188,7 +205,7 @@
   function vistaContador() {
     var d = S.datos, cuerpo;
     if (!d) cuerpo = cargando(); else if (!d.toma_activa) cuerpo = vacioToma(); else cuerpo = resumenBarra(d.unidades) + listaPorTabs('contador');
-    return '<main class="pantalla">' + cabecera('Elegir pasillo', S.ses.usuario + ' · contador') + '<div class="cuerpo">' + cuerpo + '</div></main>';
+    return '<main class="pantalla">' + cabecera('Pasillos', S.ses.usuario + ' · contador') + '<div class="cuerpo">' + cuerpo + '</div></main>';
   }
   function vistaTomada() {
     var u = (S.datos ? S.datos.unidades : []).filter(function (x) { return x.id === S.unidadActual; })[0];
@@ -309,8 +326,8 @@
   var ACC = {
     tab: function (b) { S.tab = b.dataset.id; S.zona = null; render(); },
     zona: function (b) { S.zona = b.dataset.id; render(); },
-    recargar: function () { toast('Actualizando…'); if (!S.datos) { render(); } Promise.resolve(cargarSegunVista()).then(function () { if (S.online) toast('Lista al día.'); }); },
-    admtab: function (b) { S.adminTab = b.dataset.id; S.filtroHist = ''; render(); window.scrollTo(0, 0); cargarSegunVista(); },
+    recargar: function () { toast('Actualizando…'); S.errCarga = ''; render(); Promise.resolve(cargarSegunVista()).then(function () { if (S.online) toast('Lista al día.'); }); },
+    admtab: function (b) { S.adminTab = b.dataset.id; S.filtroHist = ''; S.errCarga = ''; render(); window.scrollTo(0, 0); cargarSegunVista(); },
     atras: function () { S.vista = S.ses && S.ses.debe ? 'pin' : 'home'; render(); cargarSegunVista(); },
     cerrarModal: cerrarModal,
     salir: function () { cerrarModal(); var t = S.ses && S.ses.token; api('logout', { token: t }).then(function () {}); S.aviso = ''; salirLocal(); },
@@ -407,7 +424,7 @@
       });
     } else if (tipo === 'hist') { S.filtroHist = v.q || ''; buscarHistorial(); }
   });
-  window.addEventListener('online', function () { S.online = true; renderConScroll(); });
+  window.addEventListener('online', function () { S.online = true; renderConScroll(); if (S.ses && S.vista === 'home') cargarSegunVista(true); });
   window.addEventListener('offline', function () { S.online = false; renderConScroll(); });
 
   // actualización automática de la lista (solo con la pantalla visible y sin ventanas abiertas)
