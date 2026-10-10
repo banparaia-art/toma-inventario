@@ -27,7 +27,10 @@
   function esActivo(v) { return v === true || String(v).toLowerCase() === 'true'; }
 
   // ---------- comunicación con el servicio ----------
-  function api(accion, p) {
+  var LECTURAS = { yo: 1, listarUnidades: 1, listarUsuarios: 1, historial: 1, validarDatos: 1 };
+  function espera(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  // Reintenta una vez: si el servidor dijo "ocupado" (no ejecutó nada, es seguro) o si una lectura no llegó.
+  function api(accion, p, intento) {
     var body = { accion: accion, token: S.ses ? S.ses.token : undefined };
     for (var k in (p || {})) body[k] = p[k];
     var ctl = ('AbortController' in window) ? new AbortController() : null, to = setTimeout(function () { if (ctl) ctl.abort(); }, 30000);
@@ -35,11 +38,19 @@
       .then(function (r) { return r.json(); })
       .then(function (j) {
         clearTimeout(to); S.online = true;
+        if (j && j.error === 'ocupado' && !intento) return espera(1500).then(function () { return api(accion, p, 1); });
         if (j && accion !== 'login' && (j.error === 'sin_sesion' || j.error === 'sesion_vencida' || j.error === 'inactivo')) { salirLocal(j.mensaje); }
         return j || { ok: false, mensaje: 'Respuesta vacía.' };
       })
-      .catch(function () { clearTimeout(to); S.online = false; return { ok: false, error: 'red', mensaje: 'Sin conexión con el servidor. Revisa tu señal e inténtalo otra vez.' }; });
+      .catch(function () {
+        clearTimeout(to);
+        if (LECTURAS[accion] && !intento) return espera(1500).then(function () { return api(accion, p, 1); });
+        S.online = false; return { ok: false, error: 'red', mensaje: 'Sin conexión con el servidor. Revisa tu señal e inténtalo otra vez.' };
+      });
   }
+  // Bloquea el botón y muestra qué está pasando mientras el servidor responde (evita dobles toques).
+  function ocupar(b, txt) { if (!b) return; b.disabled = true; b.dataset.txt = b.textContent; b.textContent = txt; }
+  function liberarBoton(b) { if (!b) return; b.disabled = false; if (b.dataset.txt) b.textContent = b.dataset.txt; }
 
   // ---------- sesión ----------
   function guardarSesion() { ls('ses', S.ses ? JSON.stringify(S.ses) : null); }
@@ -80,6 +91,7 @@
     return '<header class="cab' + (teal ? ' teal' : '') + '">' +
       (atras ? '<button class="ibtn" data-a="atras" aria-label="Volver">‹</button>' : '') +
       '<div class="t"><h1>' + esc(titulo) + '</h1><small>' + esc(sub || '') + '</small></div>' +
+      (S.ses && S.vista === 'home' ? '<button class="ibtn" data-a="recargar" aria-label="Actualizar">↻</button>' : '') +
       '<span class="chip' + (S.online ? '' : ' off') + '">' + (S.online ? 'En línea' : 'Sin conexión') + '</span>' +
       (S.ses ? '<button class="ibtn" data-a="menu" aria-label="Menú de ' + esc(S.ses.usuario) + '">' + ini + '</button>' : '') + '</header>';
   }
@@ -297,7 +309,7 @@
   var ACC = {
     tab: function (b) { S.tab = b.dataset.id; S.zona = null; render(); },
     zona: function (b) { S.zona = b.dataset.id; render(); },
-    recargar: function () { S.datos = null; render(); cargarSegunVista(); },
+    recargar: function () { toast('Actualizando…'); if (!S.datos) { render(); } Promise.resolve(cargarSegunVista()).then(function () { if (S.online) toast('Lista al día.'); }); },
     admtab: function (b) { S.adminTab = b.dataset.id; S.filtroHist = ''; render(); window.scrollTo(0, 0); cargarSegunVista(); },
     atras: function () { S.vista = S.ses && S.ses.debe ? 'pin' : 'home'; render(); cargarSegunVista(); },
     cerrarModal: cerrarModal,
@@ -309,9 +321,9 @@
 
     pedirTomar: function (b) { var u = unidadPorId(b.dataset.id); confirmar('¿Tomar ' + nombreUnidad(u) + '?', 'Quedará bloqueado para los demás operarios. Solo el administrador puede liberarlo.', 'Tomar', 'tomar', b.dataset.id); },
     tomar: function (b) {
-      var id = b.dataset.id; b.disabled = true;
+      var id = b.dataset.id; ocupar(b, 'Tomando…');
       api('tomarUnidad', { id: id }).then(function (r) {
-        if (!r.ok) { b.disabled = false; if ($capa.className === 'on') mostrarError(null, r.mensaje); else toast(r.mensaje); if (r.error !== 'red') cargarUnidades(true); return; }
+        if (!r.ok) { liberarBoton(b); if ($capa.className === 'on') mostrarError(null, r.mensaje); else toast(r.mensaje); if (r.error !== 'red') cargarUnidades(true); return; }
         cerrarModal(); S.unidadActual = id; S.vista = 'tomada'; render(); window.scrollTo(0, 0); cargarUnidades(true).then(function () { if (S.vista === 'tomada') render(); });
       });
     },
@@ -321,9 +333,9 @@
         '<div class="campo"><label for="mot">Motivo</label><input id="mot" autocomplete="off"></div>');
     },
     liberar: function (b) {
-      var mot = ($capa.querySelector('#mot') || {}).value || '';
+      var mot = ($capa.querySelector('#mot') || {}).value || ''; ocupar(b, 'Liberando…');
       api('liberarUnidad', { id: b.dataset.id, motivo: mot }).then(function (r) {
-        if (!r.ok) return mostrarError(null, r.mensaje);
+        if (!r.ok) { liberarBoton(b); return mostrarError(null, r.mensaje); }
         cerrarModal(); toast('Unidad liberada.'); cargarUnidades();
       });
     },
@@ -339,9 +351,9 @@
       var i = S.informe.informe; confirmar('¿Abrir la toma?', i.unidades_conteo + ' unidades y ' + i.filas_leidas + ' filas quedarán disponibles para los contadores.', 'Abrir toma', 'abrir');
     },
     abrir: function (b) {
-      b.disabled = true;
+      ocupar(b, 'Abriendo…');
       api('abrirToma').then(function (r) {
-        if (!r.ok) { b.disabled = false; return mostrarError(null, r.mensaje); }
+        if (!r.ok) { liberarBoton(b); return mostrarError(null, r.mensaje); }
         cerrarModal(); S.informe = null; toast('Toma abierta: ' + r.unidades + ' unidades.'); S.adminTab = 'avance'; S.datos = null; render(); cargarUnidades();
       });
     },
@@ -352,7 +364,8 @@
     },
     pedirReset: function (b) { confirmar('¿Generar un PIN nuevo para ' + b.dataset.id + '?', 'Se anula su PIN actual y se genera uno temporal que deberá cambiar al entrar.', 'Generar PIN', 'reset', b.dataset.id); },
     reset: function (b) {
-      api('resetearPin', { usuario: b.dataset.id }).then(function (r) { if (!r.ok) return mostrarError(null, r.mensaje); mostrarPin(r.usuario, r.pin_temporal); cargarSegunVista(); });
+      ocupar(b, 'Generando…');
+      api('resetearPin', { usuario: b.dataset.id }).then(function (r) { if (!r.ok) { liberarBoton(b); return mostrarError(null, r.mensaje); } mostrarPin(r.usuario, r.pin_temporal); cargarSegunVista(); });
     },
     desbloquear: function (b) { api('desbloquearUsuario', { usuario: b.dataset.id }).then(function (r) { toast(r.ok ? 'Usuario desbloqueado.' : r.mensaje); cargarSegunVista(); }); },
     activar: function (b) { api('activarUsuario', { usuario: b.dataset.id, activo: b.dataset.v === '1' }).then(function (r) { toast(r.ok ? (b.dataset.v === '1' ? 'Usuario activado.' : 'Usuario desactivado.') : r.mensaje); cargarSegunVista(); }); }
