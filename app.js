@@ -107,7 +107,7 @@
   function cabecera(titulo, sub, teal, atras) {
     var ini = S.ses ? esc(S.ses.usuario.charAt(0).toUpperCase()) : '';
     return '<header class="cab' + (teal ? ' teal' : '') + '">' +
-      (atras ? '<button class="ibtn" data-a="atras" aria-label="Volver">‹</button>' : '') +
+      (atras ? '<button class="batras" data-a="atras" aria-label="Volver atrás"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"/></svg><span>Atrás</span></button>' : '') +
       '<div class="t"><h1>' + esc(titulo) + '</h1><small>' + esc(sub || '') + '</small></div>' +
       (S.ses && S.vista === 'home' ? '<button class="ibtn" data-a="recargar" aria-label="Actualizar">↻</button>' : '') +
       '<span id="chip" class="' + chipTxt().c + '">' + esc(chipTxt().t) + '</span>' +
@@ -572,6 +572,8 @@
     },
     salirYa: function () { cerrarModal(); CM = {}; ACC.salir(true); },
     cerrarModal: cerrarModal,
+    quedarme: cerrarModal,
+    salirApp: function () { SALIENDO = true; cerrarModal(); flush(true); history.go(-2); setTimeout(function () { try { window.close(); } catch (e) {} SALIENDO = false; }, 700); },
     salir: function (ya) {
       var p = pendientes().length;
       if (p && ya !== true) { modal('<h3>Tienes conteos sin enviar</h3><p>' + p + (p === 1 ? ' conteo todavía no llegó' : ' conteos todavía no llegaron') + ' al servidor. Si sales ahora quedan guardados en este celular y se enviarán cuando ingreses de nuevo con tu usuario.</p><div id="msg"></div><div class="botones"><button class="btn gr" data-a="cerrarModal">Cancelar</button><button class="btn rel" data-a="enviarYSalir">Enviar ahora</button></div><div style="margin-top:10px"><button class="btn pel ancho" data-a="salirYa">Salir sin enviar</button></div>'); return; }
@@ -690,6 +692,34 @@
     cargarUnidades(true);
   }, (CFG.REFRESCO_SEG || 20) * 1000);
   document.addEventListener('visibilitychange', function () { if (!document.hidden && S.ses && S.vista === 'home') cargarSegunVista(true); });
+
+  // ---------- botón "atrás" del celular ----------
+  // Atrás sube un nivel dentro de la app. Solo en la pantalla principal pregunta si de verdad quieres salir.
+  var SALIENDO = false;
+  function textoSalida() {
+    var mia = (S.datos && S.datos.unidades ? S.datos.unidades : []).filter(function (u) { return u.mia; })[0], p = pendientes().length, t = [];
+    if (mia) t.push('Tienes <b>' + esc(nombreUnidad(mia)) + '</b> en conteo, sin cerrar.');
+    if (p) t.push('Hay <b>' + p + '</b> conteo' + (p === 1 ? '' : 's') + ' sin enviar; se enviarán cuando vuelvas a abrir la app con tu usuario.');
+    return t.length ? t.join(' ') + ' ¿Seguro que quieres salir?' : '¿Seguro que quieres salir de la aplicación?';
+  }
+  function preguntarSalida() {
+    modal('<h3>¿Salir de la aplicación?</h3><p>' + (S.ses ? textoSalida() : '¿Seguro que quieres salir?') + '</p><div class="botones"><button class="btn rel" data-a="quedarme">Quedarme</button><button class="btn gr" data-a="salirApp">Salir</button></div>', true);
+  }
+  function alAtras() {
+    if ($capa.className === 'on') { cerrarModal(); return; }
+    if (!S.ses) return preguntarSalida();
+    if (S.vista === 'contar') return ACC.atras();
+    if (S.vista === 'pin') { if (S.ses.debe) { toast('Primero cambia tu PIN.'); return; } S.vista = 'home'; render(); cargarSegunVista(); return; }
+    if (S.ses.rol === 'administrador' && S.adminTab !== 'avance') { S.adminTab = 'avance'; S.errCarga = ''; render(); cargarSegunVista(); return; }
+    preguntarSalida();
+  }
+  try {
+    if (!(history.state && history.state.n === 'app')) { history.replaceState({ n: 'base' }, ''); history.pushState({ n: 'app' }, ''); }
+    window.addEventListener('popstate', function () {
+      if (SALIENDO) return;
+      if (!(history.state && history.state.n === 'app')) { try { history.pushState({ n: 'app' }, ''); } catch (e) {} alAtras(); }
+    });
+  } catch (e) {}
 
   // ---------- arranque ----------
   try { var g = ls('ses'); if (g) { var o = JSON.parse(g); if (o && o.token && new Date(o.vence).getTime() > Date.now()) S.ses = o; } } catch (e) {}
