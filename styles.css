@@ -136,3 +136,30 @@ button{cursor:pointer}
 
 #estado{position:fixed;left:0;right:0;top:0;z-index:40;background:var(--amb);color:#1a1200;font-weight:600;text-align:center;padding:calc(8px + env(safe-area-inset-top)) 12px 8px;display:none}
 #estado.on{display:block}
+
+/* ---- conteo (F2a) ---- */
+.chip.pen{background:var(--ambbg);color:var(--amb);border-color:#6b5200}
+.prbar{height:8px;border-radius:2px;background:#1a2733;margin-top:10px;overflow:hidden}
+.prbar i{display:block;height:100%;background:var(--ver);transition:width .25s}
+.pos-lista{margin-top:0}
+.grupo{position:sticky;top:0;z-index:2;background:var(--pan2);color:var(--tx2);padding:9px 14px;border-bottom:1px solid var(--line);font:600 16px var(--f-cond);letter-spacing:.3px}
+.grupo b{color:var(--azul2);font-weight:700}
+.fc{display:grid;grid-template-columns:62px 1fr auto;gap:10px;align-items:center;padding:12px 14px;border-bottom:1px solid var(--line);min-height:84px}
+.fc .pos{width:58px;min-height:52px;border-radius:6px;background:var(--azulbg);color:var(--azul2);display:grid;place-content:center;text-align:center;font:700 24px/1 var(--f-cond);overflow-wrap:anywhere}
+.fc .pos small{font:600 11px var(--f-txt);color:var(--amb);margin-top:3px}
+.fc .dat{min-width:0}
+.fc .cod{font:500 17px var(--f-mono)}
+.fc .desc{font-size:14px;color:var(--tx);overflow-wrap:anywhere;line-height:1.2;margin-top:1px}
+.fc .lv{font-size:12.5px;color:var(--tx3);margin-top:3px}
+.fc .lv b{color:var(--tx2);font-weight:600}
+.fc .sinart{color:var(--tx3);font-style:italic;font-size:14px}
+.fc .ent{display:flex;flex-direction:column;gap:6px;align-items:stretch;width:92px}
+.fc input.q{width:100%;min-height:48px;text-align:center;font:500 24px var(--f-mono);background:var(--pan);border:1.5px solid var(--line);border-radius:6px;padding:0 4px}
+.fc input.q:focus{border-color:var(--amb);outline:none}
+.fc .vac{min-height:34px;border-radius:6px;border:1.5px solid var(--line);background:none;color:var(--tx2);font:600 14px var(--f-txt)}
+.fc.hecha{box-shadow:inset 4px 0 0 var(--ver)}
+.fc.hecha input.q{border-color:#14502f;background:var(--verbg)}
+.fc.vacia .vac{background:var(--verbg);border-color:#14502f;color:var(--ver)}
+.fc.vacia .vac::after{content:" ✓"}
+.fc.blanco .pos{background:#1b2630;color:var(--tx3)}
+.solopend .fc.hecha:not(:focus-within){display:none}

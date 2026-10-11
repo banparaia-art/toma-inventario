@@ -1,7 +1,7 @@
-/* Toma de inventario · F1 (acceso + elegir pasillo/torre + panel de administrador) */
+/* Toma de inventario · F2a (acceso, elegir pasillo/torre, conteo con envío en segundo plano, panel de administrador) */
 (function () {
   'use strict';
-  var CFG = window.CONFIG, VERSION = 'F1';
+  var CFG = window.CONFIG, VERSION = 'F2a';
   var S = { ses: null, vista: 'login', datos: null, tab: null, zona: null, adminTab: 'avance', usuarios: null, historial: null,
             informe: null, ocupado: false, lentos: 0, errCarga: '', online: navigator.onLine, aviso: '', filtroHist: '' };
   var $app = document.getElementById('app'), $capa = document.getElementById('capa'), $aviso = document.getElementById('aviso');
@@ -29,7 +29,7 @@
   function esActivo(v) { return v === true || String(v).toLowerCase() === 'true'; }
 
   // ---------- comunicación con el servicio ----------
-  var LECTURAS = { yo: 1, listarUnidades: 1, listarUsuarios: 1, historial: 1, validarDatos: 1 };
+  var LECTURAS = { posicionesUnidad: 1, yo: 1, listarUnidades: 1, listarUsuarios: 1, historial: 1, validarDatos: 1 };
   var ESPERAS = [2000, 4000, 8000];            // pausas entre reintentos de lecturas (servidor dormido o celular sin red aún)
   function espera(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
   function pintarEstado() { var e = document.getElementById('estado'); if (e) e.className = S.lentos > 0 ? 'on' : ''; }
@@ -66,13 +66,14 @@
   // ---------- sesión ----------
   function guardarSesion() { ls('ses', S.ses ? JSON.stringify(S.ses) : null); }
   function salirLocal(msg) {
-    S.ses = null; S.errCarga = ''; S.datos = null; S.usuarios = null; S.historial = null; S.informe = null; guardarSesion();
+    S.ses = null; CM = {}; CT.datos = null; S.errCarga = ''; S.datos = null; S.usuarios = null; S.historial = null; S.informe = null; guardarSesion();
     S.vista = 'login'; S.aviso = msg || ''; cerrarModal(); render();
   }
   function entrar() {
     S.datos = null; S.tab = null;
     S.vista = S.ses.debe ? 'pin' : 'home'; S.adminTab = 'avance'; render();
     if (!S.ses.debe) cargarSegunVista();
+    cargarLocal();
   }
 
   // ---------- carga de datos ----------
@@ -109,7 +110,7 @@
       (atras ? '<button class="ibtn" data-a="atras" aria-label="Volver">‹</button>' : '') +
       '<div class="t"><h1>' + esc(titulo) + '</h1><small>' + esc(sub || '') + '</small></div>' +
       (S.ses && S.vista === 'home' ? '<button class="ibtn" data-a="recargar" aria-label="Actualizar">↻</button>' : '') +
-      '<span class="chip' + (S.online ? '' : ' off') + '">' + (S.online ? 'En línea' : 'Sin conexión') + '</span>' +
+      '<span id="chip" class="' + chipTxt().c + '">' + esc(chipTxt().t) + '</span>' +
       (S.ses ? '<button class="ibtn" data-a="menu" aria-label="Menú de ' + esc(S.ses.usuario) + '">' + ini + '</button>' : '') + '</header>';
   }
   function modal(html, fija) {
@@ -207,16 +208,6 @@
     if (!d) cuerpo = cargando(); else if (!d.toma_activa) cuerpo = vacioToma(); else cuerpo = resumenBarra(d.unidades) + listaPorTabs('contador');
     return '<main class="pantalla">' + cabecera('Pasillos', S.ses.usuario + ' · contador') + '<div class="cuerpo">' + cuerpo + '</div></main>';
   }
-  function vistaTomada() {
-    var u = (S.datos ? S.datos.unidades : []).filter(function (x) { return x.id === S.unidadActual; })[0];
-    var nombre = u ? (u.tipo === 'torre' ? 'Torre ' + u.torre : 'Pasillo ' + u.pasillo) : S.unidadActual;
-    var sub = u && u.tipo !== 'torre' ? 'Nave ' + u.nave + (u.zona ? ' · ' + u.zona.charAt(0) + u.zona.slice(1).toLowerCase() : '') : 'Modula';
-    return '<main class="pantalla">' + cabecera(nombre, sub + ' · ' + S.ses.usuario, u && u.tipo === 'torre', true) +
-      '<div class="cuerpo"><div class="form"><div class="ok"><b>Es tuyo.</b> Quedó bloqueado para los demás operarios.</div>' +
-      '<div class="aviso">El conteo posición por posición se activa en la fase F2. Por ahora tu unidad queda reservada con tu nombre.</div>' +
-      '<button class="btn rel ancho" data-a="atras">Volver a la lista</button></div></div></main>';
-  }
-
   // ---------- AJUSTADOR (solo lectura en F1) ----------
   function vistaAjustador() {
     var d = S.datos, cuerpo;
@@ -296,12 +287,242 @@
     return '<main class="pantalla">' + cabecera(t, S.ses.usuario + ' · administrador') + '<div class="cuerpo">' + c + '</div>' + navAdmin() + '</main>';
   }
 
+  // ======================================================================
+  // CONTEO (F2a): guardar en el celular primero, enviar al Sheet en segundo plano
+  // ======================================================================
+  var CM = {};                                    // conteos locales: clave unidad|fila -> {k,fila,unidad,c,v,t,sync,usuario}  sync: 0 pendiente, 1 enviado, 2 rechazado
+  var CT = { datos: null, udc: null, filtro: 'todas', perdida: '', fuera: false };
+  var SY = { timer: null, enCurso: false, fallos: 0, bloq: {} };
+  var IDB = null, IDB_LISTO = null;
+
+  function dbAbrir() {
+    if (IDB_LISTO) return IDB_LISTO;
+    IDB_LISTO = new Promise(function (ok) {
+      try {
+        var rq = indexedDB.open('inventario', 1);
+        rq.onupgradeneeded = function () { var d = rq.result; d.createObjectStore('conteos', { keyPath: 'k' }); d.createObjectStore('pos', { keyPath: 'unidad' }); };
+        rq.onsuccess = function () { IDB = rq.result; ok(IDB); };
+        rq.onerror = function () { ok(null); };
+        rq.onblocked = function () { ok(null); };
+      } catch (e) { ok(null); }
+    });
+    return IDB_LISTO;
+  }
+  function dbPut(store, obj) {
+    return dbAbrir().then(function (d) { if (!d) return; return new Promise(function (ok) { try { var tx = d.transaction(store, 'readwrite'); tx.objectStore(store).put(obj); tx.oncomplete = tx.onerror = tx.onabort = function () { ok(); }; } catch (e) { ok(); } }); });
+  }
+  function dbTodo(store) {
+    return dbAbrir().then(function (d) { if (!d) return []; return new Promise(function (ok) { try { var rq = d.transaction(store).objectStore(store).getAll(); rq.onsuccess = function () { ok(rq.result || []); }; rq.onerror = function () { ok([]); }; } catch (e) { ok([]); } }); });
+  }
+  function dbUno(store, key) {
+    return dbAbrir().then(function (d) { if (!d) return null; return new Promise(function (ok) { try { var rq = d.transaction(store).objectStore(store).get(key); rq.onsuccess = function () { ok(rq.result || null); }; rq.onerror = function () { ok(null); }; } catch (e) { ok(null); } }); });
+  }
+  /** Al entrar: recupera lo que este usuario dejó sin enviar (por ejemplo, si se cerró la app sin señal). */
+  function cargarLocal() {
+    CM = {};
+    return dbTodo('conteos').then(function (l) {
+      l.forEach(function (e) { if (S.ses && e.usuario === S.ses.usuario) CM[e.k] = e; });
+      pintarChip(); if (pendientes().length) { programarFlush(); flush(); }
+    });
+  }
+  function pendientes() { var u = S.ses && S.ses.usuario; return Object.keys(CM).map(function (k) { return CM[k]; }).filter(function (e) { return e.sync === 0 && e.usuario === u; }); }
+
+  function fmtVcto(v) { var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(v || ''); return m ? m[3] + '/' + m[2] + '/' + m[1] : (v || ''); }
+  function prepararFilas(d) {
+    var f = d.filas, i = 0;
+    while (i < f.length) {                                         // posiciones repetidas seguidas (misma UDC y POS): "1 de 2"
+      var j = i; while (j + 1 < f.length && f[j + 1].udc === f[i].udc && f[j + 1].pos === f[i].pos) j++;
+      for (var k = i; k <= j; k++) f[k].rep = (j > i) ? (k - i + 1) + ' de ' + (j - i + 1) : '';
+      i = j + 1;
+    }
+    d.filas.forEach(function (x) { x.blanco = !x.codigo; });
+  }
+  function entradaDe(fila) { return CM[S.unidadActual + '|' + fila]; }
+  function alcance() {
+    var f = CT.datos ? CT.datos.filas : [];
+    if (CT.datos && CT.datos.unidad.tipo === 'torre' && CT.udc) f = f.filter(function (x) { return x.udc === CT.udc; });
+    return f;
+  }
+  function contadas(lista) { return lista.filter(function (x) { return entradaDe(x.id); }).length; }
+
+  // ---------- abrir / cargar ----------
+  function abrirConteo(id) {
+    S.unidadActual = id; S.vista = 'contar'; CT.udc = null; CT.filtro = 'todas'; CT.perdida = ''; CT.fuera = false; S.errCarga = '';
+    delete SY.bloq[id];
+    if (!CT.datos || CT.datos.unidad.id !== id) CT.datos = null;
+    render(); window.scrollTo(0, 0);
+    return cargarConteo();
+  }
+  function fusionar(id, srv) {
+    Object.keys(srv || {}).forEach(function (fila) {
+      var s = srv[fila], k = id + '|' + fila, l = CM[k];
+      if (!l || Number(s.t) > l.t) { CM[k] = { k: k, fila: fila, unidad: id, c: Number(s.c), v: s.v ? 1 : 0, t: Number(s.t), sync: 1, usuario: S.ses.usuario }; dbPut('conteos', CM[k]); }
+    });
+  }
+  function cargarConteo() {
+    var id = S.unidadActual;
+    function usar(d, desdeCache) {
+      prepararFilas(d); CT.datos = d; CT.fuera = !!desdeCache; S.errCarga = '';
+      if (S.vista === 'contar' && S.unidadActual === id) { render(); }
+    }
+    function cache(motivo) {
+      return dbUno('pos', id).then(function (c) {
+        if (c && c.usuario === S.ses.usuario) { usar({ unidad: c.info, filas: c.filas }, true); return { ok: true, cache: true }; }
+        S.errCarga = motivo; if (S.vista === 'contar') render(); return { ok: false };
+      });
+    }
+    if (!navigator.onLine) return cache('Sin conexión y esta unidad aún no se guardó en el celular. Conéctate una vez para descargarla.');
+    return api('posicionesUnidad', { id: id }).then(function (r) {
+      if (r.ok) {
+        fusionar(id, r.conteos); usar({ unidad: r.unidad, filas: r.filas }, false);
+        dbPut('pos', { unidad: id, info: r.unidad, filas: r.filas, usuario: S.ses.usuario });
+        pintarChip(); programarFlush(); return r;
+      }
+      if (r.error === 'no_tuya' || r.error === 'sin_toma' || r.error === 'no_existe') { CT.perdida = r.mensaje; CT.datos = null; if (S.vista === 'contar') render(); return r; }
+      if (r.error === 'red') return cache(r.mensaje);
+      S.errCarga = r.mensaje || 'No se pudo cargar.'; if (S.vista === 'contar') render(); return r;
+    });
+  }
+
+  // ---------- pantalla ----------
+  function chipTxt() {
+    var p = pendientes().length;
+    if (!S.online) return { t: 'Sin conexión' + (p ? ' · ' + p : ''), c: 'chip off' };
+    if (p) return { t: p + ' sin enviar', c: 'chip pen' };
+    return { t: S.vista === 'contar' ? 'Guardado' : 'En línea', c: 'chip' };
+  }
+  function pintarChip() { var e = document.getElementById('chip'); if (!e) return; var c = chipTxt(); e.textContent = c.t; e.className = c.c; }
+
+  function filaHtml(f) {
+    var e = entradaDe(f.id), val = e ? String(e.c) : '', cls = 'fc' + (e ? ' hecha' : '') + (f.blanco ? ' blanco' : '') + (e && e.v ? ' vacia' : '');
+    return '<li class="' + cls + '" data-fila="' + esc(f.id) + '">' +
+      '<div class="pos" aria-label="Posición ' + esc(f.pos) + '">' + esc(f.pos) + (f.rep ? '<small>' + esc(f.rep) + '</small>' : '') + '</div>' +
+      '<div class="dat">' + (f.blanco ? '<div class="sinart">Sin artículo registrado</div>' : '<div class="cod"><b>' + esc(f.codigo) + '</b></div><div class="desc">' + esc(f.descripcion) + '</div>') +
+      '<div class="lv">Lote <b>' + esc(f.lote || '—') + '</b> · Vcto <b>' + esc(f.vcto ? fmtVcto(f.vcto) : '—') + '</b></div></div>' +
+      '<div class="ent"><input class="q" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" enterkeyhint="next" data-q="' + esc(f.id) + '" value="' + esc(val) + '" placeholder="0" aria-label="Cantidad posición ' + esc(f.pos) + '">' +
+      '<button class="vac" data-a="vacia" data-id="' + esc(f.id) + '">Vacía</button></div></li>';
+  }
+  function progresoHtml(lista, tit) {
+    var n = contadas(lista), t = lista.length, pct = t ? Math.round(n * 100 / t) : 0;
+    return '<section class="resumen" id="prog"><h2>' + n + ' de ' + t + ' contadas</h2><div class="sub">' + esc(tit) + '</div><div class="prbar"><i style="width:' + pct + '%"></i></div></section>';
+  }
+  function vistaContar() {
+    var d = CT.datos, u = d && d.unidad, torre = u && u.tipo === 'torre';
+    var titulo = u ? (torre ? 'Torre ' + u.torre : 'Pasillo ' + u.pasillo) : (nombreUnidad(unidadPorId(S.unidadActual)) || 'Conteo');
+    var sub = u ? (torre ? 'Modula' : 'Nave ' + u.nave + (u.zona ? ' · ' + u.zona.charAt(0) + u.zona.slice(1).toLowerCase() : '')) : '';
+    if (torre && CT.udc) sub = 'UDC ' + CT.udc;
+    var cuerpo;
+    if (CT.perdida) cuerpo = '<div class="vacio"><h2>Esta unidad ya no es tuya</h2><p>' + esc(CT.perdida) + '</p>' + (pendientes().filter(function (e) { return e.unidad === S.unidadActual; }).length ? '<p>Lo que contaste sin enviar queda guardado en este celular. Avisa al administrador.</p>' : '') + '<button class="btn rel" data-a="atras">Volver a la lista</button></div>';
+    else if (S.errCarga && !d) cuerpo = cargando();
+    else if (!d) cuerpo = cargando();
+    else if (torre && !CT.udc) cuerpo = cuerpoUdcs(d);
+    else cuerpo = cuerpoPosiciones(d, torre);
+    return '<main class="pantalla">' + cabecera(titulo, sub + (sub ? ' · ' : '') + S.ses.usuario, torre, true) + '<div class="cuerpo">' + cuerpo + '</div></main>';
+  }
+  function cuerpoUdcs(d) {
+    var orden = [], mapa = {};
+    d.filas.forEach(function (f) { if (!mapa[f.udc]) { mapa[f.udc] = []; orden.push(f.udc); } mapa[f.udc].push(f); });
+    return (CT.fuera ? '<div class="aviso" style="margin:12px 14px 0">Sin conexión: se muestran los datos guardados en tu celular.</div>' : '') + progresoHtml(d.filas, 'Elige una UDC (bandeja)') +
+      '<ul class="lista">' + orden.map(function (udc) {
+        var l = mapa[udc], n = contadas(l), ok = n === l.length;
+        return '<li class="u' + (ok ? ' cerrado' : '') + '"><div class="letra torre" aria-hidden="true">' + esc(String(udc).slice(-3)) + '</div><div class="info"><div class="nom">UDC ' + esc(udc) + '</div><div class="det">' + n + ' de ' + l.length + ' posiciones</div></div><button class="btn' + (ok ? ' gr' : ' rel') + '" data-a="udc" data-id="' + esc(udc) + '">' + (ok ? 'Revisar' : (n ? 'Seguir' : 'Contar')) + '</button></li>';
+      }).join('') + '</ul>';
+  }
+  function cuerpoPosiciones(d, torre) {
+    var f = alcance(), h = '', ult = null;
+    f.forEach(function (x) {
+      if (!torre) { var g = x.celda + '|' + x.udc; if (g !== ult) { ult = g; h += '<li class="grupo">' + (x.celda ? 'Celda <b>' + esc(x.celda) + '</b> · ' : '') + 'UDC <b>' + esc(x.udc) + '</b></li>'; } }
+      h += filaHtml(x);
+    });
+    return (CT.fuera ? '<div class="aviso" style="margin:12px 14px 0">Sin conexión: se muestran los datos guardados en tu celular.</div>' : '') +
+      progresoHtml(f, torre ? 'Escribe la cantidad o toca Vacía' : 'Escribe la cantidad o toca Vacía en cada posición') +
+      '<div class="seg" role="group"><button data-a="filtro" data-id="todas" aria-pressed="' + (CT.filtro === 'todas') + '">Todas</button><button data-a="filtro" data-id="pend" aria-pressed="' + (CT.filtro === 'pend') + '">Pendientes</button></div>' +
+      '<ul class="lista pos-lista' + (CT.filtro === 'pend' ? ' solopend' : '') + '" id="posl">' + h + '</ul>' +
+      '<p class="pie">Se guarda en tu celular al instante y se envía sola. Si una posición está vacía, toca <b>Vacía</b>.</p>';
+  }
+
+  // ---------- registrar un conteo ----------
+  function pintarFila(fila) {
+    var li = document.querySelector('li.fc[data-fila="' + fila + '"]'); if (!li) return;
+    var e = entradaDe(fila); li.classList.toggle('hecha', !!e); li.classList.toggle('vacia', !!(e && e.v));
+    var inp = li.querySelector('input'); if (inp && e && document.activeElement !== inp) inp.value = String(e.c);
+    if (inp && e && document.activeElement === inp && inp.value !== String(e.c)) inp.value = String(e.c);
+    var p = document.getElementById('prog'); if (p && CT.datos) { var a = alcance(), n = contadas(a), pct = a.length ? Math.round(n * 100 / a.length) : 0; p.querySelector('h2').textContent = n + ' de ' + a.length + ' contadas'; p.querySelector('.prbar i').style.width = pct + '%'; }
+  }
+  function ponerConteo(fila, c, v) {
+    var k = S.unidadActual + '|' + fila, prev = CM[k];
+    if (prev && prev.c === c && prev.v === v) return;
+    var t = Math.max(Date.now(), prev ? prev.t + 1 : 0);
+    var e = { k: k, fila: fila, unidad: S.unidadActual, c: c, v: v, t: t, sync: 0, usuario: S.ses.usuario };
+    CM[k] = e; dbPut('conteos', e); pintarFila(fila); pintarChip(); programarFlush();
+  }
+  function filaDatos(id) { return (CT.datos ? CT.datos.filas : []).filter(function (x) { return x.id === id; })[0]; }
+  function leerCantidad(inp) {
+    var fila = inp.dataset.q, txt = inp.value.trim(), e = entradaDe(fila), f = filaDatos(fila);
+    if (txt === '') { inp.value = e ? String(e.c) : ''; return; }
+    if (!/^\d{1,6}$/.test(txt)) { toast('Escribe solo números enteros.'); inp.value = e ? String(e.c) : ''; return; }
+    var n = parseInt(txt, 10);
+    if (f && f.blanco && n > 0) {
+      toast('Esa posición no tiene artículo. Registrar producto nuevo llega en la fase F2b. Por ahora usa 0 o Vacía.');
+      inp.value = e ? String(e.c) : ''; return;
+    }
+    ponerConteo(fila, n, 0);
+  }
+
+  // ---------- envío en segundo plano ----------
+  function programarFlush() {
+    var p = pendientes().length; if (!p) return;
+    if (p >= 5) { clearTimeout(SY.timer); SY.timer = setTimeout(function () { SY.timer = null; flush(); }, 1200); }
+    else if (!SY.timer) SY.timer = setTimeout(function () { SY.timer = null; flush(); }, 30000);
+  }
+  function flush(forzar) {
+    if (SY.enCurso || !S.ses) return Promise.resolve();
+    if (!navigator.onLine) { pintarChip(); return Promise.resolve(); }
+    var por = {}; pendientes().forEach(function (e) { if (!SY.bloq[e.unidad]) (por[e.unidad] = por[e.unidad] || []).push(e); });
+    var unidades = Object.keys(por); if (!unidades.length) { pintarChip(); return Promise.resolve(); }
+    SY.enCurso = true; clearTimeout(SY.timer); SY.timer = null;
+    function siguiente(ui) {
+      if (ui >= unidades.length) return Promise.resolve(true);
+      var uid = unidades[ui], lista = por[uid].sort(function (a, b) { return a.t - b.t; });
+      function lote(i) {
+        if (i >= lista.length) return Promise.resolve(true);
+        var parte = lista.slice(i, i + 100);
+        return api('guardarConteos', { id: uid, items: parte.map(function (e) { return { fila: e.fila, cantidad: e.c, vacia: !!e.v, ts: e.t }; }) }).then(function (r) {
+          if (r.ok) {
+            SY.fallos = 0;
+            parte.forEach(function (e) { var cur = CM[e.k]; if (cur && cur.t === e.t) { cur.sync = 1; dbPut('conteos', cur); } });
+            pintarChip(); return lote(i + 100);
+          }
+          if (r.error === 'no_tuya' || r.error === 'sin_toma' || r.error === 'no_existe') {
+            SY.bloq[uid] = true; if (S.vista === 'contar' && S.unidadActual === uid) { CT.perdida = r.mensaje; render(); } else toast(r.mensaje);
+            return siguiente2(ui);
+          }
+          if (r.error === 'fila_invalida' || r.error === 'cantidad_invalida' || r.error === 'lote_grande') {
+            parte.forEach(function (e) { var cur = CM[e.k]; if (cur && cur.t === e.t) { cur.sync = 2; dbPut('conteos', cur); } });
+            toast(r.mensaje || 'Un conteo fue rechazado.'); return lote(i + 100);
+          }
+          return false;                                              // sin red u ocupado: se reintenta luego
+        });
+      }
+      function siguiente2(n) { return siguiente(n + 1); }
+      return lote(0).then(function (ok) { return ok === false ? false : siguiente(ui + 1); });
+    }
+    return siguiente(0).then(function (ok) {
+      SY.enCurso = false;
+      if (ok === false) {
+        SY.fallos++; var demora = Math.min(60000, 3000 * Math.pow(2, Math.min(SY.fallos, 5))) + Math.random() * 2000;
+        clearTimeout(SY.timer); SY.timer = setTimeout(function () { SY.timer = null; flush(); }, demora);
+      } else programarFlush();
+      pintarChip();
+    }, function () { SY.enCurso = false; pintarChip(); });
+  }
+
   // ---------- render ----------
   function render() {
     var h;
     if (!S.ses) h = vistaLogin();
     else if (S.vista === 'pin') h = vistaPin();
-    else if (S.vista === 'tomada') h = vistaTomada();
+    else if (S.vista === 'contar') h = vistaContar();
     else if (S.ses.rol === 'administrador') h = vistaAdmin();
     else if (S.ses.rol === 'contador') h = vistaContador();
     else if (S.ses.rol === 'ajustador') h = vistaAjustador();
@@ -309,6 +530,7 @@
     $app.innerHTML = h;
   }
   function renderConScroll() {
+    if (S.vista === 'contar') { pintarChip(); return; }
     var y = window.scrollY, a = document.activeElement, enFiltro = a && a.name === 'q', v = enFiltro ? a.value : null;
     if (enFiltro) return;                         // no se redibuja mientras escribe
     render(); window.scrollTo(0, y);
@@ -326,11 +548,25 @@
   var ACC = {
     tab: function (b) { S.tab = b.dataset.id; S.zona = null; render(); },
     zona: function (b) { S.zona = b.dataset.id; render(); },
-    recargar: function () { toast('Actualizando…'); S.errCarga = ''; render(); Promise.resolve(cargarSegunVista()).then(function () { if (S.online) toast('Lista al día.'); }); },
+    recargar: function () { if (S.vista === 'contar') { S.errCarga = ''; CT.datos = null; render(); cargarConteo(); return; } toast('Actualizando…'); S.errCarga = ''; render(); Promise.resolve(cargarSegunVista()).then(function () { if (S.online) toast('Lista al día.'); }); },
     admtab: function (b) { S.adminTab = b.dataset.id; S.filtroHist = ''; S.errCarga = ''; render(); window.scrollTo(0, 0); cargarSegunVista(); },
-    atras: function () { S.vista = S.ses && S.ses.debe ? 'pin' : 'home'; render(); cargarSegunVista(); },
+    atras: function () {
+      if (S.vista === 'contar' && CT.datos && CT.datos.unidad.tipo === 'torre' && CT.udc) { CT.udc = null; render(); window.scrollTo(0, 0); return; }
+      var venia = S.vista === 'contar'; S.vista = S.ses && S.ses.debe ? 'pin' : 'home'; render(); cargarSegunVista(); if (venia) flush(true);
+    },
+    udc: function (b) { CT.udc = b.dataset.id; render(); window.scrollTo(0, 0); },
+    filtro: function (b) { CT.filtro = b.dataset.id; var l = document.getElementById('posl'); if (l) l.classList.toggle('solopend', CT.filtro === 'pend'); document.querySelectorAll('.seg [data-a=filtro]').forEach(function (x) { x.setAttribute('aria-pressed', String(x.dataset.id === CT.filtro)); }); },
+    vacia: function (b) { var fila = b.dataset.id; ponerConteo(fila, 0, 1); var i = document.querySelector('input[data-q="' + fila + '"]'); if (i) i.value = '0'; },
+    enviarYSalir: function (b) {
+      ocupar(b, 'Enviando…');
+      flush(true).then(function () { if (pendientes().length) { liberarBoton(b); mostrarError(null, 'No se pudo enviar. Revisa tu señal e inténtalo de nuevo.'); } else ACC.salir(); });
+    },
+    salirYa: function () { cerrarModal(); CM = {}; ACC.salir(true); },
     cerrarModal: cerrarModal,
-    salir: function () { cerrarModal(); var t = S.ses && S.ses.token; api('logout', { token: t }).then(function () {}); S.aviso = ''; salirLocal(); },
+    salir: function (ya) {
+      var p = pendientes().length;
+      if (p && ya !== true) { modal('<h3>Tienes conteos sin enviar</h3><p>' + p + (p === 1 ? ' conteo todavía no llegó' : ' conteos todavía no llegaron') + ' al servidor. Si sales ahora quedan guardados en este celular y se enviarán cuando ingreses de nuevo con tu usuario.</p><div id="msg"></div><div class="botones"><button class="btn gr" data-a="cerrarModal">Cancelar</button><button class="btn rel" data-a="enviarYSalir">Enviar ahora</button></div><div style="margin-top:10px"><button class="btn pel ancho" data-a="salirYa">Salir sin enviar</button></div>'); return; }
+      cerrarModal(); var t = S.ses && S.ses.token; api('logout', { token: t }).then(function () {}); S.aviso = ''; salirLocal(); CM = {}; },
     menu: function () {
       modal('<h3>' + esc(S.ses.usuario) + '</h3><p>' + esc(S.ses.rol) + ' · versión ' + VERSION + '</p><div style="display:flex;flex-direction:column;gap:10px"><button class="btn gr ancho" data-a="irPin">Cambiar mi PIN</button><button class="btn pel ancho" data-a="salir">Cerrar sesión</button><button class="btn gr ancho" data-a="cerrarModal">Cerrar</button></div>');
     },
@@ -341,7 +577,7 @@
       var id = b.dataset.id; ocupar(b, 'Tomando…');
       api('tomarUnidad', { id: id }).then(function (r) {
         if (!r.ok) { liberarBoton(b); if ($capa.className === 'on') mostrarError(null, r.mensaje); else toast(r.mensaje); if (r.error !== 'red') cargarUnidades(true); return; }
-        cerrarModal(); S.unidadActual = id; S.vista = 'tomada'; render(); window.scrollTo(0, 0); cargarUnidades(true).then(function () { if (S.vista === 'tomada') render(); });
+        cerrarModal(); abrirConteo(id);
       });
     },
     pedirLiberar: function (b) {
@@ -424,7 +660,18 @@
       });
     } else if (tipo === 'hist') { S.filtroHist = v.q || ''; buscarHistorial(); }
   });
-  window.addEventListener('online', function () { S.online = true; renderConScroll(); if (S.ses && S.vista === 'home') cargarSegunVista(true); });
+  window.addEventListener('online', function () { S.online = true; renderConScroll(); flush(true); if (S.ses && S.vista === 'home') cargarSegunVista(true); });
+  var tq = {};
+  document.addEventListener('input', function (e) { var i = e.target; if (!i.matches || !i.matches('input[data-q]')) return; clearTimeout(tq[i.dataset.q]); tq[i.dataset.q] = setTimeout(function () { if (document.body.contains(i)) leerCantidad(i); }, 800); });
+  document.addEventListener('change', function (e) { var i = e.target; if (!i.matches || !i.matches('input[data-q]')) return; clearTimeout(tq[i.dataset.q]); leerCantidad(i); });
+  document.addEventListener('keydown', function (e) {
+    var i = e.target; if (e.key !== 'Enter' || !i.matches || !i.matches('input[data-q]')) return; e.preventDefault();
+    clearTimeout(tq[i.dataset.q]); leerCantidad(i);
+    var todos = [].slice.call(document.querySelectorAll('input[data-q]')).filter(function (x) { return x.offsetParent !== null; }), p = todos.indexOf(i);
+    if (todos[p + 1]) { todos[p + 1].focus(); todos[p + 1].select(); } else i.blur();
+  });
+  document.addEventListener('visibilitychange', function () { if (document.hidden) flush(true); });
+  window.addEventListener('pagehide', function () { flush(true); });
   window.addEventListener('offline', function () { S.online = false; renderConScroll(); });
 
   // actualización automática de la lista (solo con la pantalla visible y sin ventanas abiertas)
