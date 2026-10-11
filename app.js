@@ -291,7 +291,7 @@
   // CONTEO (F2a): guardar en el celular primero, enviar al Sheet en segundo plano
   // ======================================================================
   var CM = {};                                    // conteos locales: clave unidad|fila -> {k,fila,unidad,c,v,t,sync,usuario}  sync: 0 pendiente, 1 enviado, 2 rechazado
-  var CT = { datos: null, udc: null, filtro: 'todas', perdida: '', fuera: false };
+  var CT = { toma: '', datos: null, udc: null, filtro: 'todas', perdida: '', fuera: false };
   var SY = { timer: null, enCurso: false, fallos: 0, bloq: {} };
   var IDB = null, IDB_LISTO = null;
 
@@ -353,29 +353,37 @@
     render(); window.scrollTo(0, 0);
     return cargarConteo();
   }
-  function fusionar(id, srv) {
+  // Lo contado en una toma anterior (el administrador la reabrió) no debe mezclarse con la nueva.
+  function dbBorrar(store, key) { return dbAbrir().then(function (d) { if (!d) return; return new Promise(function (ok) { try { var tx = d.transaction(store, 'readwrite'); tx.objectStore(store).delete(key); tx.oncomplete = tx.onerror = tx.onabort = function () { ok(); }; } catch (e) { ok(); } }); }); }
+  function descartarUnidad(id) { Object.keys(CM).forEach(function (k) { if (CM[k].unidad === id) { delete CM[k]; dbBorrar('conteos', k); } }); }
+  function purgarOtraToma(id, toma) {
+    if (!toma) return;
+    var hay = false; Object.keys(CM).forEach(function (k) { var e = CM[k]; if (e.unidad === id && e.toma !== toma) { delete CM[k]; dbBorrar('conteos', k); hay = true; } });
+    if (hay) pintarChip();
+  }
+  function fusionar(id, srv, toma) {
     Object.keys(srv || {}).forEach(function (fila) {
       var s = srv[fila], k = id + '|' + fila, l = CM[k];
-      if (!l || Number(s.t) > l.t) { CM[k] = { k: k, fila: fila, unidad: id, c: Number(s.c), v: s.v ? 1 : 0, t: Number(s.t), sync: 1, usuario: S.ses.usuario }; dbPut('conteos', CM[k]); }
+      if (!l || Number(s.t) > l.t) { CM[k] = { k: k, fila: fila, unidad: id, c: Number(s.c), v: s.v ? 1 : 0, t: Number(s.t), sync: 1, usuario: S.ses.usuario, toma: toma }; dbPut('conteos', CM[k]); }
     });
   }
   function cargarConteo() {
     var id = S.unidadActual;
     function usar(d, desdeCache) {
-      prepararFilas(d); CT.datos = d; CT.fuera = !!desdeCache; S.errCarga = '';
+      prepararFilas(d); CT.datos = d; if (d.toma) CT.toma = d.toma; CT.fuera = !!desdeCache; S.errCarga = '';
       if (S.vista === 'contar' && S.unidadActual === id) { render(); }
     }
     function cache(motivo) {
       return dbUno('pos', id).then(function (c) {
-        if (c && c.usuario === S.ses.usuario) { usar({ unidad: c.info, filas: c.filas }, true); return { ok: true, cache: true }; }
+        if (c && c.usuario === S.ses.usuario) { usar({ unidad: c.info, filas: c.filas, toma: c.toma }, true); return { ok: true, cache: true }; }
         S.errCarga = motivo; if (S.vista === 'contar') render(); return { ok: false };
       });
     }
     if (!navigator.onLine) return cache('Sin conexión y esta unidad aún no se guardó en el celular. Conéctate una vez para descargarla.');
     return api('posicionesUnidad', { id: id }).then(function (r) {
       if (r.ok) {
-        fusionar(id, r.conteos); usar({ unidad: r.unidad, filas: r.filas }, false);
-        dbPut('pos', { unidad: id, info: r.unidad, filas: r.filas, usuario: S.ses.usuario });
+        purgarOtraToma(id, r.toma); fusionar(id, r.conteos, r.toma); usar({ unidad: r.unidad, filas: r.filas, toma: r.toma }, false);
+        dbPut('pos', { unidad: id, info: r.unidad, filas: r.filas, usuario: S.ses.usuario, toma: r.toma });
         pintarChip(); programarFlush(); return r;
       }
       if (r.error === 'no_tuya' || r.error === 'sin_toma' || r.error === 'no_existe') { CT.perdida = r.mensaje; CT.datos = null; if (S.vista === 'contar') render(); return r; }
@@ -453,7 +461,7 @@
     var k = S.unidadActual + '|' + fila, prev = CM[k];
     if (prev && prev.c === c && prev.v === v) return;
     var t = Math.max(Date.now(), prev ? prev.t + 1 : 0);
-    var e = { k: k, fila: fila, unidad: S.unidadActual, c: c, v: v, t: t, sync: 0, usuario: S.ses.usuario };
+    var e = { k: k, fila: fila, unidad: S.unidadActual, c: c, v: v, t: t, sync: 0, usuario: S.ses.usuario, toma: CT.toma };
     CM[k] = e; dbPut('conteos', e); pintarFila(fila); pintarChip(); programarFlush();
   }
   function filaDatos(id) { return (CT.datos ? CT.datos.filas : []).filter(function (x) { return x.id === id; })[0]; }
@@ -487,12 +495,13 @@
       function lote(i) {
         if (i >= lista.length) return Promise.resolve(true);
         var parte = lista.slice(i, i + 100);
-        return api('guardarConteos', { id: uid, items: parte.map(function (e) { return { fila: e.fila, cantidad: e.c, vacia: !!e.v, ts: e.t }; }) }).then(function (r) {
+        return api('guardarConteos', { id: uid, toma: lista[0].toma || '', items: parte.map(function (e) { return { fila: e.fila, cantidad: e.c, vacia: !!e.v, ts: e.t }; }) }).then(function (r) {
           if (r.ok) {
             SY.fallos = 0;
             parte.forEach(function (e) { var cur = CM[e.k]; if (cur && cur.t === e.t) { cur.sync = 1; dbPut('conteos', cur); } });
             pintarChip(); return lote(i + 100);
           }
+          if (r.error === 'toma_distinta') { descartarUnidad(uid); toast('El administrador abrió una toma nueva. Se descartó lo contado antes.'); if (S.vista === 'contar' && S.unidadActual === uid) abrirConteo(uid); return siguiente2(ui); }
           if (r.error === 'no_tuya' || r.error === 'sin_toma' || r.error === 'no_existe') {
             SY.bloq[uid] = true; if (S.vista === 'contar' && S.unidadActual === uid) { CT.perdida = r.mensaje; render(); } else toast(r.mensaje);
             return siguiente2(ui);
