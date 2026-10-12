@@ -1,7 +1,7 @@
 /* Toma de inventario · F2b (conteo, registrar producto, alerta de vencimiento, escáner de cámara) */
 (function () {
   'use strict';
-  var CFG = window.CONFIG, VERSION = 'F2b';
+  var CFG = window.CONFIG, VERSION = 'F2b.1';
   var S = { ses: null, vista: 'login', datos: null, tab: null, zona: null, adminTab: 'avance', usuarios: null, historial: null,
             informe: null, ocupado: false, lentos: 0, errCarga: '', online: navigator.onLine, aviso: '', filtroHist: '' };
   var $app = document.getElementById('app'), $capa = document.getElementById('capa'), $aviso = document.getElementById('aviso');
@@ -553,7 +553,7 @@
   // ---------- observación obligatoria (vencimiento menor a 30 días) ----------
   function abrirObs(fila, n) {
     var f = filaDatos(fila), d = datosFila(f), dias = diasHasta(d.vcto);
-    modal('<h3>' + (dias < 0 ? 'Producto vencido' : 'Vence pronto') + '</h3><p>' + esc(d.codigo) + ' · Vcto ' + esc(fmtVcto(d.vcto)) + ' (' + (dias < 0 ? 'hace ' + (-dias) + ' d' : dias === 0 ? 'hoy' : 'en ' + dias + ' d') + '). Escribe una observación para guardar ' + n + ' unidades.</p>' +
+    modal('<h3>' + (dias < 0 ? 'Producto vencido' : 'Revisar fecha de vencimiento') + '</h3><p>' + esc(d.codigo) + ' · Vcto ' + esc(fmtVcto(d.vcto)) + ' (' + (dias < 0 ? 'hace ' + (-dias) + ' d' : dias === 0 ? 'hoy' : 'en ' + dias + ' d') + '). Escribe una observación para guardar ' + n + ' unidades.</p>' +
       '<div class="campo"><label for="obs">Observación</label><input id="obs" maxlength="200" autocomplete="off" placeholder="Ej.: caja golpeada, se separó para devolución"></div><div id="msg"></div>' +
       '<div class="botones"><button class="btn gr" data-a="cerrarModal">Cancelar</button><button class="btn rel" data-a="guardarObs" data-id="' + esc(fila) + '" data-n="' + n + '">Guardar</button></div>', true);
   }
@@ -566,12 +566,12 @@
     var f = filaDatos(fila); cargarCatalogo();
     var desc = REG.cod ? descDe(REG.cod) : '';
     modal('<h3>Registrar producto</h3><p>Posición <b>' + esc(f ? f.pos : '') + '</b>. Escribe o escanea el artículo que encontraste.</p>' +
-      '<div class="campo"><label for="rk">Código del artículo</label><div class="fila-in"><input id="rk" autocapitalize="characters" autocomplete="off" spellcheck="false" maxlength="20" value="' + esc(REG.cod) + '">' +
+      '<div class="campo"><label for="rk">Código del artículo</label><div class="fila-in"><input id="rk" autocapitalize="characters" autocomplete="off" spellcheck="false" maxlength="6" value="' + esc(REG.cod) + '">' +
       (camaraDisponible() ? '<button class="btn gr" data-a="escanearReg" type="button">Escanear</button>' : '') + '</div><div class="ayuda" id="rdesc">' + descReg(REG.cod) + '</div></div>' +
       '<div class="campo"><label for="rl">Lote</label><input id="rl" autocomplete="off" maxlength="30" value="' + esc(REG.lot) + '"></div>' +
       '<div class="campo"><label for="rv">Vencimiento</label><input id="rv" type="date" min="2000-01-01" max="2100-12-31" value="' + esc(REG.vc) + '"></div>' +
       '<div class="campo"><label for="rc">Cantidad (unidades)</label><input id="rc" inputmode="numeric" pattern="[0-9]*" autocomplete="off" maxlength="6" value="' + esc(REG.c) + '"></div>' +
-      '<div class="campo" id="robsw"' + (vencCorto(REG.vc) ? '' : ' hidden') + '><label for="ro">Observación (vence pronto)</label><input id="ro" maxlength="200" autocomplete="off" value="' + esc(REG.o) + '"></div>' +
+      '<div class="campo" id="robsw"' + (vencCorto(REG.vc) ? '' : ' hidden') + '><label for="ro">Observación (revisar fecha de vencimiento)</label><input id="ro" maxlength="200" autocomplete="off" value="' + esc(REG.o) + '"></div>' +
       '<div id="msg"></div><div class="botones"><button class="btn gr" data-a="cerrarModal">Cancelar</button><button class="btn rel" data-a="guardarReg" data-id="' + esc(fila) + '">Guardar</button></div>', true);
   }
   function descReg(cod) {
@@ -748,7 +748,7 @@
     },
     guardarReg: function (b) {
       leerRegistro(); var fila = b.dataset.id, n = /^\d{1,6}$/.test(REG.c) ? parseInt(REG.c, 10) : 0;
-      if (!/^[A-Za-z0-9\-\.]{3,20}$/.test(REG.cod)) return mostrarError(null, 'Escribe el código del artículo (letras y números, sin espacios).');
+      if (!/^[A-Za-z0-9]{6}$/.test(REG.cod)) return mostrarError(null, 'El código del artículo debe tener 6 caracteres, letras o números.');
       if (!REG.lot || REG.lot.length > 30) return mostrarError(null, 'Escribe el lote.');
       if (!/^\d{4}-\d{2}-\d{2}$/.test(REG.vc) || diasHasta(REG.vc) === null) return mostrarError(null, 'Escribe el vencimiento con día, mes y año.');
       if (n < 1) return mostrarError(null, 'La cantidad debe ser mayor a 0.');
