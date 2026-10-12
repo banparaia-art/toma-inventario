@@ -1,7 +1,7 @@
-/* Toma de inventario · F2a (acceso, elegir pasillo/torre, conteo con envío en segundo plano, panel de administrador) */
+/* Toma de inventario · F2b (conteo, registrar producto, alerta de vencimiento, escáner de cámara) */
 (function () {
   'use strict';
-  var CFG = window.CONFIG, VERSION = 'F2a';
+  var CFG = window.CONFIG, VERSION = 'F2b';
   var S = { ses: null, vista: 'login', datos: null, tab: null, zona: null, adminTab: 'avance', usuarios: null, historial: null,
             informe: null, ocupado: false, lentos: 0, errCarga: '', online: navigator.onLine, aviso: '', filtroHist: '' };
   var $app = document.getElementById('app'), $capa = document.getElementById('capa'), $aviso = document.getElementById('aviso');
@@ -29,7 +29,7 @@
   function esActivo(v) { return v === true || String(v).toLowerCase() === 'true'; }
 
   // ---------- comunicación con el servicio ----------
-  var LECTURAS = { posicionesUnidad: 1, yo: 1, listarUnidades: 1, listarUsuarios: 1, historial: 1, validarDatos: 1 };
+  var LECTURAS = { articulos: 1, posicionesUnidad: 1, yo: 1, listarUnidades: 1, listarUsuarios: 1, historial: 1, validarDatos: 1 };
   var ESPERAS = [2000, 4000, 8000];            // pausas entre reintentos de lecturas (servidor dormido o celular sin red aún)
   function espera(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
   function pintarEstado() { var e = document.getElementById('estado'); if (e) e.className = S.lentos > 0 ? 'on' : ''; }
@@ -117,7 +117,7 @@
     $capa.innerHTML = '<div class="hoja" role="dialog" aria-modal="true">' + html + '</div>'; $capa.className = 'on'; $capa.dataset.fija = fija ? '1' : '';
     var f = $capa.querySelector('input,select,button'); if (f) setTimeout(function () { try { f.focus(); } catch (e) {} }, 30);
   }
-  function cerrarModal() { $capa.className = ''; $capa.innerHTML = ''; }
+  function cerrarModal() { if (typeof detenerCamara === 'function') detenerCamara(); $capa.className = ''; $capa.innerHTML = ''; }
   $capa.addEventListener('click', function (e) { if (e.target === $capa && !$capa.dataset.fija) cerrarModal(); });
 
   function ordenNat(a, b) { return String(a).localeCompare(String(b), 'es', { numeric: true }); }
@@ -351,6 +351,7 @@
     delete SY.bloq[id];
     if (!CT.datos || CT.datos.unidad.id !== id) CT.datos = null;
     render(); window.scrollTo(0, 0);
+    cargarCatalogo();
     return cargarConteo();
   }
   // Lo contado en una toma anterior (el administrador la reabrió) no debe mezclarse con la nueva.
@@ -364,7 +365,8 @@
   function fusionar(id, srv, toma) {
     Object.keys(srv || {}).forEach(function (fila) {
       var s = srv[fila], k = id + '|' + fila, l = CM[k];
-      if (!l || Number(s.t) > l.t) { CM[k] = { k: k, fila: fila, unidad: id, c: Number(s.c), v: s.v ? 1 : 0, t: Number(s.t), sync: 1, usuario: S.ses.usuario, toma: toma }; dbPut('conteos', CM[k]); }
+      if (!l || Number(s.t) > l.t) { CM[k] = { k: k, fila: fila, unidad: id, c: Number(s.c), v: s.v ? 1 : 0, t: Number(s.t), sync: 1, usuario: S.ses.usuario, toma: toma };
+      if (s.o) CM[k].o = s.o; if (s.k) { CM[k].cod = s.k; CM[k].lot = s.l || ''; CM[k].vc = s.x || ''; } dbPut('conteos', CM[k]); }
     });
   }
   function cargarConteo() {
@@ -401,12 +403,75 @@
   }
   function pintarChip() { var e = document.getElementById('chip'); if (!e) return; var c = chipTxt(); e.textContent = c.t; e.className = c.c; }
 
+  // ---------- vencimiento, catálogo y datos que se muestran en cada posición ----------
+  var DIAS_ALERTA = 30;
+  function diasHasta(iso) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso || ''); if (!m) return null;
+    var hoy = new Date(), a = Date.UTC(hoy.getFullYear(), hoy.getMonth(), hoy.getDate()), b = Date.UTC(+m[1], +m[2] - 1, +m[3]);
+    return Math.round((b - a) / 86400000);
+  }
+  function vencCorto(iso) { var d = diasHasta(iso); return d !== null && d < DIAS_ALERTA; }
+  function vencTxt(iso) {
+    var d = diasHasta(iso); if (d === null || d >= DIAS_ALERTA) return '';
+    if (d < 0) return '<span class="venc rojo">Vencido hace ' + (-d) + (d === -1 ? ' día' : ' días') + '</span>';
+    if (d === 0) return '<span class="venc rojo">Vence hoy</span>';
+    return '<span class="venc">Vence en ' + d + (d === 1 ? ' día' : ' días') + '</span>';
+  }
+  var CAT = { barras: {}, desc: {}, n: {}, listo: false, cargando: false };
+  function indexarCat() { CAT.n = {}; Object.keys(CAT.barras).forEach(function (b) { CAT.n[b.replace(/^0+/, '')] = CAT.barras[b]; }); }
+  function cargarCatalogo() {
+    if (CAT.listo || CAT.cargando) return Promise.resolve();
+    CAT.cargando = true;
+    return dbUno('pos', '__cat').then(function (c) {
+      if (c && c.usuario === S.ses.usuario && !CAT.listo) { CAT.barras = c.barras || {}; CAT.desc = c.desc || {}; indexarCat(); CAT.listo = true; refrescarDescs(); }
+      if (!navigator.onLine) { CAT.cargando = false; return; }
+      return api('articulos').then(function (r) {
+        CAT.cargando = false;
+        if (r.ok) { CAT.barras = r.barras || {}; CAT.desc = r.desc || {}; indexarCat(); CAT.listo = true; dbPut('pos', { unidad: '__cat', usuario: S.ses.usuario, barras: CAT.barras, desc: CAT.desc }); refrescarDescs(); }
+      });
+    });
+  }
+  function descDe(cod) {
+    if (CAT.desc[cod]) return CAT.desc[cod];
+    var f = (CT.datos ? CT.datos.filas : []).filter(function (x) { return x.codigo === cod && x.descripcion; })[0];
+    return f ? f.descripcion : '';
+  }
+  /** Código leído (barras de unidad o de caja, o el propio código del artículo) -> {a: artículo, caja: bool} */
+  function resolverCodigo(v) {
+    v = String(v || '').trim(); if (!v) return null;
+    var r = CAT.barras[v] || CAT.n[v.replace(/^0+/, '')];
+    if (r) return { a: r[0], caja: !!r[1] };
+    if (CAT.desc[v] || descDe(v)) return { a: v, caja: false };
+    return null;
+  }
+  /** Lo que se muestra en la posición: lo del sistema, o lo que registró el operario en una posición sin artículo. */
+  function datosFila(f) {
+    var e = entradaDe(f.id);
+    if (f.blanco && e && e.cod) return { codigo: e.cod, desc: descDe(e.cod), lote: e.lot, vcto: e.vc, reg: true };
+    return { codigo: f.codigo, desc: f.descripcion, lote: f.lote, vcto: f.vcto, reg: false };
+  }
+  function datHtml(f) {
+    var d = datosFila(f), e = entradaDe(f.id), h;
+    if (f.blanco && !d.reg) {
+      h = '<div class="sinart">Sin artículo registrado</div><div class="lv">Lote <b>—</b> · Vcto <b>—</b></div><button class="regbtn" data-a="registrar" data-id="' + esc(f.id) + '">Registrar producto</button>';
+    } else {
+      h = '<div class="cod"><b>' + esc(d.codigo) + '</b>' + (d.reg ? '<span class="pill am">Registrado por ti</span>' : '') + '</div><div class="desc">' + esc(d.desc || (d.reg ? 'Artículo sin descripción' : '')) + '</div>' +
+        '<div class="lv">Lote <b>' + esc(d.lote || '—') + '</b> · Vcto <b>' + esc(d.vcto ? fmtVcto(d.vcto) : '—') + '</b> ' + vencTxt(d.vcto) + '</div>';
+      if (d.reg) h += '<button class="regbtn" data-a="registrar" data-id="' + esc(f.id) + '">Editar registro</button>';
+    }
+    if (e && e.o) h += '<div class="obs">Obs: ' + esc(e.o) + '</div>';
+    return h;
+  }
+  function refrescarDescs() {
+    if (!CT.datos || S.vista !== 'contar') return;
+    CT.datos.filas.forEach(function (f) { if (f.blanco && entradaDe(f.id) && entradaDe(f.id).cod) { var li = document.querySelector('li.fc[data-fila="' + f.id + '"] .dat'); if (li) li.innerHTML = datHtml(f); } });
+  }
+
   function filaHtml(f) {
-    var e = entradaDe(f.id), val = e ? String(e.c) : '', cls = 'fc' + (e ? ' hecha' : '') + (f.blanco ? ' blanco' : '') + (e && e.v ? ' vacia' : '');
+    var e = entradaDe(f.id), val = e ? String(e.c) : '', cls = 'fc' + (e ? ' hecha' : '') + (f.blanco && !(e && e.cod) ? ' blanco' : '') + (e && e.v ? ' vacia' : '');
     return '<li class="' + cls + '" data-fila="' + esc(f.id) + '">' +
       '<div class="pos" aria-label="Posición ' + esc(f.pos) + '">' + esc(f.pos) + (f.rep ? '<small>' + esc(f.rep) + '</small>' : '') + '</div>' +
-      '<div class="dat">' + (f.blanco ? '<div class="sinart">Sin artículo registrado</div>' : '<div class="cod"><b>' + esc(f.codigo) + '</b></div><div class="desc">' + esc(f.descripcion) + '</div>') +
-      '<div class="lv">Lote <b>' + esc(f.lote || '—') + '</b> · Vcto <b>' + esc(f.vcto ? fmtVcto(f.vcto) : '—') + '</b></div></div>' +
+      '<div class="dat">' + datHtml(f) + '</div>' +
       '<div class="ent"><input class="q" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" enterkeyhint="next" data-q="' + esc(f.id) + '" value="' + esc(val) + '" placeholder="0" aria-label="Cantidad posición ' + esc(f.pos) + '">' +
       '<button class="vac" data-a="vacia" data-id="' + esc(f.id) + '">Vacía</button></div></li>';
   }
@@ -444,6 +509,7 @@
     });
     return (CT.fuera ? '<div class="aviso" style="margin:12px 14px 0">Sin conexión: se muestran los datos guardados en tu celular.</div>' : '') +
       progresoHtml(f, torre ? 'Escribe la cantidad o toca Vacía' : 'Escribe la cantidad o toca Vacía en cada posición') +
+      (camaraDisponible() ? '<div class="barra-esc"><button class="btn gr ancho" data-a="escanear"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8V5a1 1 0 011-1h3M16 4h3a1 1 0 011 1v3M20 16v3a1 1 0 01-1 1h-3M8 20H5a1 1 0 01-1-1v-3M7 12h10"/></svg> Escanear artículo</button></div>' : '') +
       '<div class="seg" role="group"><button data-a="filtro" data-id="todas" aria-pressed="' + (CT.filtro === 'todas') + '">Todas</button><button data-a="filtro" data-id="pend" aria-pressed="' + (CT.filtro === 'pend') + '">Pendientes</button></div>' +
       '<ul class="lista pos-lista' + (CT.filtro === 'pend' ? ' solopend' : '') + '" id="posl">' + h + '</ul>' +
       '<p class="pie">Se guarda en tu celular al instante y se envía sola. Si una posición está vacía, toca <b>Vacía</b>.</p>';
@@ -452,29 +518,117 @@
   // ---------- registrar un conteo ----------
   function pintarFila(fila) {
     var li = document.querySelector('li.fc[data-fila="' + fila + '"]'); if (!li) return;
-    var e = entradaDe(fila); li.classList.toggle('hecha', !!e); li.classList.toggle('vacia', !!(e && e.v));
+    var e = entradaDe(fila), f0 = filaDatos(fila); li.classList.toggle('hecha', !!e); li.classList.toggle('vacia', !!(e && e.v)); if (f0) { li.classList.toggle('blanco', !!(f0.blanco && !(e && e.cod))); var dd = li.querySelector('.dat'); if (dd) dd.innerHTML = datHtml(f0); }
     var inp = li.querySelector('input'); if (inp && e && document.activeElement !== inp) inp.value = String(e.c);
     if (inp && e && document.activeElement === inp && inp.value !== String(e.c)) inp.value = String(e.c);
     var p = document.getElementById('prog'); if (p && CT.datos) { var a = alcance(), n = contadas(a), pct = a.length ? Math.round(n * 100 / a.length) : 0; p.querySelector('h2').textContent = n + ' de ' + a.length + ' contadas'; p.querySelector('.prbar i').style.width = pct + '%'; }
   }
-  function ponerConteo(fila, c, v) {
-    var k = S.unidadActual + '|' + fila, prev = CM[k];
-    if (prev && prev.c === c && prev.v === v) return;
+  function ponerConteo(fila, c, v, extra) {
+    var k = S.unidadActual + '|' + fila, prev = CM[k]; extra = extra || {};
+    var o = extra.o !== undefined ? extra.o : (prev && prev.o ? prev.o : '');
+    var cod = '', lot = '', vc = '';
+    if (extra.cod) { cod = extra.cod; lot = extra.lot || ''; vc = extra.vc || ''; }
+    else if (prev && prev.cod && c > 0 && !v && extra.mantener) { cod = prev.cod; lot = prev.lot; vc = prev.vc; }
+    if (prev && prev.c === c && prev.v === v && (prev.o || '') === o && (prev.cod || '') === cod && (prev.lot || '') === lot && (prev.vc || '') === vc) return;
     var t = Math.max(Date.now(), prev ? prev.t + 1 : 0);
     var e = { k: k, fila: fila, unidad: S.unidadActual, c: c, v: v, t: t, sync: 0, usuario: S.ses.usuario, toma: CT.toma };
+    if (o) e.o = o; if (cod) { e.cod = cod; e.lot = lot; e.vc = vc; }
     CM[k] = e; dbPut('conteos', e); pintarFila(fila); pintarChip(); programarFlush();
   }
   function filaDatos(id) { return (CT.datos ? CT.datos.filas : []).filter(function (x) { return x.id === id; })[0]; }
   function leerCantidad(inp) {
     var fila = inp.dataset.q, txt = inp.value.trim(), e = entradaDe(fila), f = filaDatos(fila);
-    if (txt === '') { inp.value = e ? String(e.c) : ''; return; }
-    if (!/^\d{1,6}$/.test(txt)) { toast('Escribe solo números enteros.'); inp.value = e ? String(e.c) : ''; return; }
+    function revertir() { inp.value = e ? String(e.c) : ''; }
+    if (txt === '') { revertir(); return; }
+    if (!/^\d{1,6}$/.test(txt)) { toast('Escribe solo números enteros.'); revertir(); return; }
     var n = parseInt(txt, 10);
-    if (f && f.blanco && n > 0) {
-      toast('Esa posición no tiene artículo. Registrar producto nuevo llega en la fase F2b. Por ahora usa 0 o Vacía.');
-      inp.value = e ? String(e.c) : ''; return;
+    if (n > 0 && f && f.blanco && !(e && e.cod)) { revertir(); abrirRegistro(fila, { c: n }); return; }          // posición sin artículo: registrar producto
+    if (n > 0) {
+      var d = f ? datosFila(f) : null, previo = e && e.o ? e.o : '';
+      if (d && vencCorto(d.vcto) && !previo) { revertir(); abrirObs(fila, n); return; }
     }
-    ponerConteo(fila, n, 0);
+    ponerConteo(fila, n, 0, { mantener: true });
+  }
+
+  // ---------- observación obligatoria (vencimiento menor a 30 días) ----------
+  function abrirObs(fila, n) {
+    var f = filaDatos(fila), d = datosFila(f), dias = diasHasta(d.vcto);
+    modal('<h3>' + (dias < 0 ? 'Producto vencido' : 'Vence pronto') + '</h3><p>' + esc(d.codigo) + ' · Vcto ' + esc(fmtVcto(d.vcto)) + ' (' + (dias < 0 ? 'hace ' + (-dias) + ' d' : dias === 0 ? 'hoy' : 'en ' + dias + ' d') + '). Escribe una observación para guardar ' + n + ' unidades.</p>' +
+      '<div class="campo"><label for="obs">Observación</label><input id="obs" maxlength="200" autocomplete="off" placeholder="Ej.: caja golpeada, se separó para devolución"></div><div id="msg"></div>' +
+      '<div class="botones"><button class="btn gr" data-a="cerrarModal">Cancelar</button><button class="btn rel" data-a="guardarObs" data-id="' + esc(fila) + '" data-n="' + n + '">Guardar</button></div>', true);
+  }
+
+  // ---------- registrar producto en una posición sin artículo ----------
+  var REG = { fila: '', cod: '', lot: '', vc: '', c: '', o: '' };
+  function abrirRegistro(fila, ini) {
+    var e = entradaDe(fila);
+    if (ini) { REG = { fila: fila, cod: '', lot: '', vc: '', c: '', o: '' }; if (e && e.cod) { REG.cod = e.cod; REG.lot = e.lot; REG.vc = e.vc; REG.c = String(e.c); REG.o = e.o || ''; } if (ini.c) REG.c = String(ini.c); }
+    var f = filaDatos(fila); cargarCatalogo();
+    var desc = REG.cod ? descDe(REG.cod) : '';
+    modal('<h3>Registrar producto</h3><p>Posición <b>' + esc(f ? f.pos : '') + '</b>. Escribe o escanea el artículo que encontraste.</p>' +
+      '<div class="campo"><label for="rk">Código del artículo</label><div class="fila-in"><input id="rk" autocapitalize="characters" autocomplete="off" spellcheck="false" maxlength="20" value="' + esc(REG.cod) + '">' +
+      (camaraDisponible() ? '<button class="btn gr" data-a="escanearReg" type="button">Escanear</button>' : '') + '</div><div class="ayuda" id="rdesc">' + descReg(REG.cod) + '</div></div>' +
+      '<div class="campo"><label for="rl">Lote</label><input id="rl" autocomplete="off" maxlength="30" value="' + esc(REG.lot) + '"></div>' +
+      '<div class="campo"><label for="rv">Vencimiento</label><input id="rv" type="date" min="2000-01-01" max="2100-12-31" value="' + esc(REG.vc) + '"></div>' +
+      '<div class="campo"><label for="rc">Cantidad (unidades)</label><input id="rc" inputmode="numeric" pattern="[0-9]*" autocomplete="off" maxlength="6" value="' + esc(REG.c) + '"></div>' +
+      '<div class="campo" id="robsw"' + (vencCorto(REG.vc) ? '' : ' hidden') + '><label for="ro">Observación (vence pronto)</label><input id="ro" maxlength="200" autocomplete="off" value="' + esc(REG.o) + '"></div>' +
+      '<div id="msg"></div><div class="botones"><button class="btn gr" data-a="cerrarModal">Cancelar</button><button class="btn rel" data-a="guardarReg" data-id="' + esc(fila) + '">Guardar</button></div>', true);
+  }
+  function descReg(cod) {
+    if (!cod) return '';
+    var d = descDe(cod); if (d) return esc(d);
+    return CAT.listo ? '<span class="aviso-in">Ese código no está en el sistema. Puedes registrarlo igual.</span>' : '';
+  }
+  function leerRegistro() {
+    var g = function (id) { var x = $capa.querySelector('#' + id); return x ? x.value.trim() : ''; };
+    REG.cod = g('rk').toUpperCase(); REG.lot = g('rl'); REG.vc = g('rv'); REG.c = g('rc'); REG.o = g('ro');
+  }
+
+  // ---------- cámara: escáner de códigos de barra ----------
+  var CAM = { stream: null, timer: 0, activo: false, volver: null };
+  function camaraDisponible() { return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && 'BarcodeDetector' in window); }
+  function detenerCamara() {
+    CAM.activo = false; clearTimeout(CAM.timer);
+    if (CAM.stream) { try { CAM.stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {} CAM.stream = null; }
+  }
+  function abrirCamara(titulo, alLeer, alCancelar) {
+    if (!camaraDisponible()) { toast('Este celular no permite escanear con la cámara. Escribe el código.'); if (alCancelar) alCancelar(); return; }
+    modal('<h3>' + esc(titulo) + '</h3><div class="visor"><video id="cam" playsinline muted autoplay></video><div class="mira" aria-hidden="true"></div></div><p id="camsub">Apunta la cámara al código de barras.</p><div id="msg"></div><div class="botones"><button class="btn gr" data-a="cerrarCamara">Cancelar</button></div>', true);
+    CAM.volver = alCancelar || null; CAM.activo = true;
+    var det; try { det = new BarcodeDetector({ formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'itf'] }); } catch (e) { try { det = new BarcodeDetector(); } catch (e2) { det = null; } }
+    if (!det) { mostrarError(null, 'No se pudo iniciar el lector de códigos.'); return; }
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } }, audio: false }).then(function (stream) {
+      if (!CAM.activo) { stream.getTracks().forEach(function (t) { t.stop(); }); return; }
+      CAM.stream = stream; var v = document.getElementById('cam'); if (!v) return; v.srcObject = stream; var p = v.play(); if (p && p.catch) p.catch(function () {});
+      (function ciclo() {
+        if (!CAM.activo) return;
+        det.detect(v).then(function (cs) {
+          if (!CAM.activo) return;
+          if (cs && cs.length && cs[0].rawValue) { var val = cs[0].rawValue; try { navigator.vibrate && navigator.vibrate(60); } catch (e) {} detenerCamara(); cerrarModal(); alLeer(val); return; }
+          CAM.timer = setTimeout(ciclo, 220);
+        }, function () { CAM.timer = setTimeout(ciclo, 400); });
+      })();
+    }).catch(function () { mostrarError(null, 'No se pudo abrir la cámara. Revisa que la app tenga permiso de cámara.'); });
+  }
+  /** Escaneo suelto en la lista: ubica el artículo leído y lo marca. */
+  function ubicarArticulo(valor) {
+    cargarCatalogo().then(function () {
+      var r = resolverCodigo(valor);
+      if (!r) { toast('Código ' + valor + ' no encontrado en el catálogo.'); return; }
+      var todas = CT.datos ? CT.datos.filas : [], enAlc = alcance();
+      function coincide(f) { var d = datosFila(f); return d.codigo === r.a; }
+      var cand = enAlc.filter(coincide); cand = cand.filter(function (f) { return !entradaDe(f.id); }).concat(cand);
+      if (!cand.length) {
+        var otra = todas.filter(coincide)[0];
+        toast(otra && CT.datos.unidad.tipo === 'torre' ? 'El artículo ' + r.a + ' está en la UDC ' + otra.udc + '.' : 'El artículo ' + r.a + ' no está en esta unidad. Si lo encontraste en una posición vacía, usa Registrar producto.');
+        return;
+      }
+      var li = document.querySelector('li.fc[data-fila="' + cand[0].id + '"]'); if (!li) return;
+      if (CT.filtro === 'pend' && li.classList.contains('hecha')) { CT.filtro = 'todas'; var l = document.getElementById('posl'); if (l) l.classList.remove('solopend'); }
+      li.scrollIntoView({ block: 'center' }); li.classList.add('resal'); setTimeout(function () { li.classList.remove('resal'); }, 2600);
+      var i = li.querySelector('input'); if (i) { i.focus(); i.select(); }
+      toast((r.caja ? 'Código de caja · ' : '') + 'Artículo ' + r.a + (cand.length > 1 ? ' (hay ' + cand.length + ' posiciones)' : ''));
+    });
   }
 
   // ---------- envío en segundo plano ----------
@@ -495,23 +649,32 @@
       function lote(i) {
         if (i >= lista.length) return Promise.resolve(true);
         var parte = lista.slice(i, i + 100);
-        return api('guardarConteos', { id: uid, toma: lista[0].toma || '', items: parte.map(function (e) { return { fila: e.fila, cantidad: e.c, vacia: !!e.v, ts: e.t }; }) }).then(function (r) {
-          if (r.ok) {
-            SY.fallos = 0;
-            parte.forEach(function (e) { var cur = CM[e.k]; if (cur && cur.t === e.t) { cur.sync = 1; dbPut('conteos', cur); } });
-            pintarChip(); return lote(i + 100);
-          }
-          if (r.error === 'toma_distinta') { descartarUnidad(uid); toast('El administrador abrió una toma nueva. Se descartó lo contado antes.'); if (S.vista === 'contar' && S.unidadActual === uid) abrirConteo(uid); return siguiente2(ui); }
-          if (r.error === 'no_tuya' || r.error === 'sin_toma' || r.error === 'no_existe') {
-            SY.bloq[uid] = true; if (S.vista === 'contar' && S.unidadActual === uid) { CT.perdida = r.mensaje; render(); } else toast(r.mensaje);
-            return siguiente2(ui);
-          }
-          if (r.error === 'fila_invalida' || r.error === 'cantidad_invalida' || r.error === 'lote_grande') {
-            parte.forEach(function (e) { var cur = CM[e.k]; if (cur && cur.t === e.t) { cur.sync = 2; dbPut('conteos', cur); } });
-            toast(r.mensaje || 'Un conteo fue rechazado.'); return lote(i + 100);
-          }
-          return false;                                              // sin red u ocupado: se reintenta luego
-        });
+        function item(e) { var o = { fila: e.fila, cantidad: e.c, vacia: !!e.v, ts: e.t }; if (e.o) o.obs = e.o; if (e.cod) { o.codigo = e.cod; o.lote = e.lot; o.vcto = e.vc; } return o; }
+        function enviar(p) {
+          return api('guardarConteos', { id: uid, toma: p[0].toma || '', items: p.map(item) }).then(function (r) {
+            if (r.ok) {
+              SY.fallos = 0;
+              p.forEach(function (e) { var cur = CM[e.k]; if (cur && cur.t === e.t) { cur.sync = 1; dbPut('conteos', cur); } });
+              pintarChip(); return 'ok';
+            }
+            if (r.error === 'toma_distinta') { descartarUnidad(uid); toast('El administrador abrió una toma nueva. Se descartó lo contado antes.'); if (S.vista === 'contar' && S.unidadActual === uid) abrirConteo(uid); return 'otra'; }
+            if (r.error === 'no_tuya' || r.error === 'sin_toma' || r.error === 'no_existe') {
+              SY.bloq[uid] = true; if (S.vista === 'contar' && S.unidadActual === uid) { CT.perdida = r.mensaje; render(); } else toast(r.mensaje);
+              return 'otra';
+            }
+            if (/^(fila_invalida|cantidad_invalida|lote_grande|falta_registro|registro_no_permitido|registro_sin_cantidad|codigo_invalido|lote_invalido|vcto_invalido|obs_requerida)$/.test(r.error)) {
+              if (p.length > 1) {                                 // un conteo malo no debe frenar a los buenos: se envían de uno en uno
+                var seq = Promise.resolve('ok');
+                p.forEach(function (e) { seq = seq.then(function (est) { return est === 'ok' || est === 'mal' ? enviar([e]).then(function (x) { return x === 'mal' ? 'ok' : x; }) : est; }); });
+                return seq;
+              }
+              var cur = CM[p[0].k]; if (cur && cur.t === p[0].t) { cur.sync = 2; dbPut('conteos', cur); }
+              toast(r.mensaje || 'Un conteo fue rechazado.'); pintarChip(); return 'mal';
+            }
+            return 'red';                                          // sin red u ocupado: se reintenta luego
+          });
+        }
+        return enviar(parte).then(function (est) { if (est === 'red') return false; if (est === 'otra') return siguiente2(ui); return lote(i + 100); });
       }
       function siguiente2(n) { return siguiente(n + 1); }
       return lote(0).then(function (ok) { return ok === false ? false : siguiente(ui + 1); });
@@ -573,6 +736,26 @@
     salirYa: function () { cerrarModal(); CM = {}; ACC.salir(true); },
     cerrarModal: cerrarModal,
     quedarme: cerrarModal,
+    registrar: function (b) { abrirRegistro(b.dataset.id, {}); },
+    escanear: function () { abrirCamara('Escanear artículo', ubicarArticulo); },
+    escanearReg: function () { leerRegistro(); var fila = REG.fila; abrirCamara('Escanear código', function (v) { cargarCatalogo().then(function () { var r = resolverCodigo(v); REG.cod = r ? r.a : String(v).toUpperCase(); abrirRegistro(fila); if (!r) toast('Código leído: ' + v + '. No está en el catálogo.'); else if (r.caja) toast('Código de caja. Cuenta unidades sueltas.'); }); }, function () { abrirRegistro(fila); }); },
+    cerrarCamara: function () { var v = CAM.volver; cerrarModal(); if (v) v(); },
+    guardarObs: function (b) {
+      var o = (($capa.querySelector('#obs') || {}).value || '').trim();
+      if (o.length < 3) return mostrarError(null, 'Escribe una observación (mínimo 3 letras).');
+      var fila = b.dataset.id, n = parseInt(b.dataset.n, 10); cerrarModal(); ponerConteo(fila, n, 0, { o: o, mantener: true });
+      var i = document.querySelector('input[data-q="' + fila + '"]'); if (i) i.value = String(n);
+    },
+    guardarReg: function (b) {
+      leerRegistro(); var fila = b.dataset.id, n = /^\d{1,6}$/.test(REG.c) ? parseInt(REG.c, 10) : 0;
+      if (!/^[A-Za-z0-9\-\.]{3,20}$/.test(REG.cod)) return mostrarError(null, 'Escribe el código del artículo (letras y números, sin espacios).');
+      if (!REG.lot || REG.lot.length > 30) return mostrarError(null, 'Escribe el lote.');
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(REG.vc) || diasHasta(REG.vc) === null) return mostrarError(null, 'Escribe el vencimiento con día, mes y año.');
+      if (n < 1) return mostrarError(null, 'La cantidad debe ser mayor a 0.');
+      var corto = vencCorto(REG.vc); if (corto && REG.o.length < 3) { var w = $capa.querySelector('#robsw'); if (w) w.hidden = false; return mostrarError(null, 'Vence en menos de ' + DIAS_ALERTA + ' días o ya venció: escribe una observación.'); }
+      cerrarModal(); ponerConteo(fila, n, 0, { cod: REG.cod, lot: REG.lot, vc: REG.vc, o: corto ? REG.o : '' });
+      var i = document.querySelector('input[data-q="' + fila + '"]'); if (i) i.value = String(n);
+    },
     salirApp: function () { SALIENDO = true; cerrarModal(); flush(true); history.go(-2); setTimeout(function () { try { window.close(); } catch (e) {} SALIENDO = false; }, 700); },
     salir: function (ya) {
       var p = pendientes().length;
@@ -671,7 +854,7 @@
       });
     } else if (tipo === 'hist') { S.filtroHist = v.q || ''; buscarHistorial(); }
   });
-  window.addEventListener('online', function () { S.online = true; renderConScroll(); flush(true); if (S.ses && S.vista === 'home') cargarSegunVista(true); });
+  window.addEventListener('online', function () { S.online = true; renderConScroll(); flush(true).then(function () { if (S.ses && S.vista === 'contar' && CT.fuera && $capa.className !== 'on') cargarConteo(); }); if (S.ses && S.vista === 'home') cargarSegunVista(true); });
   var tq = {};
   document.addEventListener('input', function (e) { var i = e.target; if (!i.matches || !i.matches('input[data-q]')) return; clearTimeout(tq[i.dataset.q]); tq[i.dataset.q] = setTimeout(function () { if (document.body.contains(i)) leerCantidad(i); }, 800); });
   document.addEventListener('change', function (e) { var i = e.target; if (!i.matches || !i.matches('input[data-q]')) return; clearTimeout(tq[i.dataset.q]); leerCantidad(i); });
@@ -680,6 +863,11 @@
     clearTimeout(tq[i.dataset.q]); leerCantidad(i);
     var todos = [].slice.call(document.querySelectorAll('input[data-q]')).filter(function (x) { return x.offsetParent !== null; }), p = todos.indexOf(i);
     if (todos[p + 1]) { todos[p + 1].focus(); todos[p + 1].select(); } else i.blur();
+  });
+  document.addEventListener('input', function (e) {
+    var i = e.target; if (!i || !i.id) return;
+    if (i.id === 'rk') { var d = document.getElementById('rdesc'); if (d) d.innerHTML = descReg(i.value.trim().toUpperCase()); }
+    if (i.id === 'rv') { var w = document.getElementById('robsw'); if (w) w.hidden = !vencCorto(i.value); }
   });
   document.addEventListener('visibilitychange', function () { if (document.hidden) flush(true); });
   window.addEventListener('pagehide', function () { flush(true); });

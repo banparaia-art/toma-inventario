@@ -166,3 +166,24 @@ button{cursor:pointer}
 
 .batras{display:flex;align-items:center;gap:4px;min-height:44px;padding:0 12px 0 8px;border-radius:10px;border:1px solid #2c4a8a;background:rgba(255,255,255,.08);color:#fff;font:700 18px var(--f-cond);flex:0 0 auto}
 .batras svg{flex:0 0 auto}
+
+/* ---- F2b: vencimiento, registro de producto, escáner ---- */
+.venc{display:inline-block;margin-left:4px;padding:2px 6px;border-radius:3px;background:var(--ambbg);color:var(--amb);font:600 12px var(--f-txt);border:1px solid #6b5200}
+.venc.rojo{background:var(--rojobg);color:var(--rojo);border-color:#6B1F22}
+.obs{margin-top:4px;font-size:12.5px;color:var(--amb);overflow-wrap:anywhere}
+.regbtn{margin-top:6px;min-height:36px;padding:0 12px;border-radius:6px;border:1.5px solid var(--azul2);background:none;color:var(--azul2);font:700 15px var(--f-cond)}
+.fc .cod .pill{margin-left:8px}
+.barra-esc{padding:12px 14px 0}
+.barra-esc .btn{display:flex;align-items:center;justify-content:center;gap:8px;min-height:48px;font-size:19px}
+.fila-in{display:flex;gap:8px}
+.fila-in input{flex:1;min-width:0}
+.fila-in .btn{flex:0 0 auto}
+.ayuda{margin-top:6px;font-size:14px;color:var(--tx2);min-height:18px}
+.aviso-in{color:var(--amb)}
+.visor{position:relative;background:#000;border-radius:8px;overflow:hidden;aspect-ratio:4/3;margin-bottom:10px}
+.visor video{width:100%;height:100%;object-fit:cover;display:block}
+.mira{position:absolute;left:12%;right:12%;top:30%;bottom:30%;border:3px solid var(--amb);border-radius:8px;box-shadow:0 0 0 999px rgba(0,0,0,.35)}
+.fc.resal{animation:resal 2.6s ease-out}
+@keyframes resal{0%,60%{background:var(--ambbg)}100%{background:transparent}}
+@media (prefers-reduced-motion:reduce){.fc.resal{animation:none;background:var(--ambbg)}}
+.campo[hidden]{display:none}
