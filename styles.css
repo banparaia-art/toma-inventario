@@ -187,3 +187,8 @@ button{cursor:pointer}
 @keyframes resal{0%,60%{background:var(--ambbg)}100%{background:transparent}}
 @media (prefers-reduced-motion:reduce){.fc.resal{animation:none;background:var(--ambbg)}}
 .campo[hidden]{display:none}
+
+/* F3 */
+.u .acc{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;align-items:center;max-width:46%}
+.cierre{padding:4px 14px 28px}
+.cierre .btn{min-height:54px;font-size:20px}

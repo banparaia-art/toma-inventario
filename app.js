@@ -1,7 +1,7 @@
 /* Toma de inventario · F2b (conteo, registrar producto, alerta de vencimiento, escáner de cámara) */
 (function () {
   'use strict';
-  var CFG = window.CONFIG, VERSION = 'F2b.1';
+  var CFG = window.CONFIG, VERSION = 'F3.1';
   var S = { ses: null, vista: 'login', datos: null, tab: null, zona: null, adminTab: 'avance', usuarios: null, historial: null,
             informe: null, ocupado: false, lentos: 0, errCarga: '', online: navigator.onLine, aviso: '', filtroHist: '' };
   var $app = document.getElementById('app'), $capa = document.getElementById('capa'), $aviso = document.getElementById('aviso');
@@ -29,7 +29,7 @@
   function esActivo(v) { return v === true || String(v).toLowerCase() === 'true'; }
 
   // ---------- comunicación con el servicio ----------
-  var LECTURAS = { articulos: 1, posicionesUnidad: 1, yo: 1, listarUnidades: 1, listarUsuarios: 1, historial: 1, validarDatos: 1 };
+  var LECTURAS = { avance: 1, cambiosUnidad: 1, articulos: 1, posicionesUnidad: 1, yo: 1, listarUnidades: 1, listarUsuarios: 1, historial: 1, validarDatos: 1 };
   var ESPERAS = [2000, 4000, 8000];            // pausas entre reintentos de lecturas (servidor dormido o celular sin red aún)
   function espera(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
   function pintarEstado() { var e = document.getElementById('estado'); if (e) e.className = S.lentos > 0 ? 'on' : ''; }
@@ -96,6 +96,7 @@
     if (S.ses.rol === 'administrador') {
       if (S.adminTab === 'usuarios') return api('listarUsuarios').then(function (r) { if (r.ok) { S.errCarga = ''; S.usuarios = r.usuarios; renderConScroll(); } else if (!S.usuarios) { S.errCarga = r.mensaje; render(); } else toast(r.mensaje); });
       if (S.adminTab === 'historial') return buscarHistorial();
+      if (S.adminTab === 'avance') api('avance').then(function (r) { if (r.ok && r.toma_activa) { S.av = r; renderConScroll(); } });
     }
     return cargarUnidades(silencioso);
   }
@@ -171,7 +172,10 @@
       else if (u.estado === 'Cerrado' || u.estado === 'Ajustado' || u.estado === 'En ajuste') acc = '<span class="est ok">' + esc(u.estado) + '</span>';
       else acc = '<span class="est">Bloqueado</span>';
     } else if (modo === 'admin') {
-      if (u.estado === 'En conteo') acc = '<button class="btn pel peq" data-a="pedirLiberar" data-id="' + esc(u.id) + '">Liberar</button>';
+      var hechas = S.av && S.av.contadas ? (S.av.contadas[u.id] || 0) : null, id = esc(u.id);
+      if (hechas !== null && (u.estado === 'En conteo' || u.estado === 'Cerrado')) sub += ' · ' + hechas + ' de ' + u.filas;
+      if (u.estado === 'En conteo') acc = '<div class="acc"><button class="btn peq" data-a="pedirCerrarAdm" data-id="' + id + '">Cerrar</button><button class="btn gr peq" data-a="verCambios" data-id="' + id + '">Cambios</button><button class="btn pel peq" data-a="pedirLiberar" data-id="' + id + '">Liberar</button></div>';
+      else if (u.estado === 'Cerrado') acc = '<div class="acc"><span class="est ok">Cerrado</span><button class="btn gr peq" data-a="verCambios" data-id="' + id + '">Cambios</button><button class="btn peq" data-a="pedirReabrir" data-id="' + id + '">Reabrir</button></div>';
       else acc = '<span class="est' + (u.estado === 'Pendiente' ? '' : ' ok') + '">' + esc(u.estado) + '</span>';
     } else { acc = '<span class="est' + (u.estado === 'Pendiente' ? '' : ' ok') + '">' + esc(u.estado) + '</span>'; }
     return '<li class="' + cls + '"><div class="letra' + (torre ? ' torre' : '') + '" aria-hidden="true">' + esc(rotulo) + '</div>' +
@@ -233,34 +237,44 @@
     var tabs = agrupar(un), secciones = tabs.map(function (t) {
       return '<div class="sec">' + esc(t.nombre) + '</div><ul class="lista">' + unidadesDeTab(un, t.id).map(function (u) { return filaUnidad(u, 'admin'); }).join('') + '</ul>';
     }).join('');
-    return resumenBarra(un) + '<div class="tarjetas"><div class="tj"><small>Pendientes</small><b>' + c.Pendiente + '</b></div><div class="tj amb"><small>En conteo</small><b>' + c['En conteo'] + '</b></div>' +
-      '<div class="tj ver"><small>Cerradas</small><b>' + c.cer + '</b></div><div class="tj"><small>Unidades</small><b>' + un.length + '</b></div></div>' + secciones;
+    var av = S.av, tot = av ? '<section class="resumen"><h2>' + av.total_contadas + ' de ' + av.total_filas + ' posiciones contadas</h2><div class="sub">' + (av.total_filas ? Math.round(av.total_contadas * 100 / av.total_filas) : 0) + ' % de la toma</div><div class="prbar"><i style="width:' + (av.total_filas ? Math.min(100, Math.round(av.total_contadas * 100 / av.total_filas)) : 0) + '%"></i></div></section>' : '';
+    var ops = av && av.operadores && av.operadores.length ? '<div class="sec">Contadores</div><ul class="lista">' + av.operadores.map(function (o) {
+      return '<li class="fila"><div class="info"><div class="nom">' + esc(o.usuario) + '</div><div class="det">' + o.en_conteo + ' en conteo · ' + o.cerradas + ' cerradas</div></div><b class="mono">' + o.posiciones + '</b></li>'; }).join('') + '</ul>' : '';
+    return resumenBarra(un) + tot + '<div class="tarjetas"><div class="tj"><small>Pendientes</small><b>' + c.Pendiente + '</b></div><div class="tj amb"><small>En conteo</small><b>' + c['En conteo'] + '</b></div>' +
+      '<div class="tj ver"><small>Cerradas</small><b>' + c.cer + '</b></div><div class="tj"><small>Unidades</small><b>' + un.length + '</b></div></div>' + ops + secciones;
   }
   function adminCarga() {
     var d = S.datos, abierta = d && d.toma_activa, inf = S.informe, h = '<div class="form">';
     if (!d) return cargando();
     if (abierta) {
-      h += '<div class="ok"><b>Hay una toma abierta</b> con ' + d.unidades.length + ' unidades. Para cerrarla y archivarla se usa la fase F5.</div>';
+      h += '<div class="ok"><b>Hay una toma abierta</b> con ' + d.unidades.length + ' unidades.</div>' +
+        '<div class="aviso">Para sumar más naves o pasillos: cárgalos en el Google Sheet, valida y toca <b>Agregar a la toma</b>. Lo que ya se está contando no se toca.</div>';
     } else {
-      h += '<div class="aviso">Antes de abrir la toma, valida los datos de las pestañas MODULA y MINORISTA Y MAYORISTA del Google Sheet.</div>' +
-        '<button class="btn amb ancho" data-a="validar"' + (S.ocupado ? ' disabled' : '') + '>' + (S.ocupado ? 'Validando…' : 'Validar datos') + '</button>';
+      h += '<div class="aviso">Antes de abrir la toma, valida los datos de las pestañas MODULA y MINORISTA Y MAYORISTA del Google Sheet.</div>';
     }
-    if (inf && !abierta) {
+    h += '<button class="btn amb ancho" data-a="validar"' + (S.ocupado ? ' disabled' : '') + '>' + (S.ocupado ? 'Validando…' : 'Validar datos') + '</button>';
+    if (inf) {
       h += '<div class="tarjetas" style="padding:0"><div class="tj"><small>Filas leídas</small><b>' + inf.informe.filas_leidas + '</b></div><div class="tj"><small>Unidades</small><b>' + inf.informe.unidades_conteo + '</b></div>' +
         '<div class="tj"><small>Pasillos</small><b>' + inf.informe.pasillos + '</b></div><div class="tj"><small>Torres Modula</small><b>' + inf.informe.torres + '</b></div></div>';
       if (inf.informe.errores.length) {
         h += '<div class="err"><b>' + inf.informe.errores.length + ' error(es) que corregir:</b><ul style="margin:8px 0 0;padding-left:18px">' +
           inf.informe.errores.slice(0, 30).map(function (e) { return '<li>' + esc(e.hoja) + (e.fila ? ' · fila ' + esc(e.fila) : '') + ': ' + esc(e.msg) + '</li>'; }).join('') + '</ul>' +
           (inf.informe.errores.length > 30 ? '<div style="margin-top:6px">…y ' + (inf.informe.errores.length - 30) + ' más.</div>' : '') + '</div>';
+      } else if (abierta && inf.previa) {
+        var pv = inf.previa;
+        h += '<div class="ok">' + (pv.nuevas || pv.actualizar ? 'Se agregarán <b>' + pv.nuevas + '</b> unidades nuevas (' + pv.filas_nuevas + ' posiciones)' + (pv.actualizar ? ' y se actualizarán <b>' + pv.actualizar + '</b> pendientes' : '') + '.' : 'No hay unidades nuevas para agregar.') +
+          (pv.intactas ? ' <b>' + pv.intactas + '</b> ya están en curso o cerradas y no se tocan.' : '') + '</div>';
       } else {
-        h += '<div class="ok">Los datos están bien. Puedes abrir la toma.</div>';
+        h += '<div class="ok">Los datos están bien.' + (abierta ? '' : ' Puedes abrir la toma.') + '</div>';
       }
       if (inf.informe.advertencias.length) {
         h += '<div class="sec" style="padding:6px 0">Avisos (no bloquean)</div>' + inf.informe.advertencias.map(function (a) {
           return '<div class="fila" style="padding:8px 0"><div class="info">' + esc(a.texto) + '</div><b class="mono">' + esc(a.cantidad) + '</b></div>'; }).join('');
       }
-      h += '<button class="btn rel ancho" data-a="pedirAbrir"' + (inf.ok ? '' : ' disabled') + '>Abrir toma</button>';
+      if (abierta) h += '<button class="btn rel ancho" data-a="pedirAgregar"' + (inf.ok && inf.previa && (inf.previa.nuevas || inf.previa.actualizar) ? '' : ' disabled') + '>Agregar a la toma</button>';
+      else h += '<button class="btn rel ancho" data-a="pedirAbrir"' + (inf.ok ? '' : ' disabled') + '>Abrir toma</button>';
     }
+    if (abierta) h += '<div class="sec" style="padding:14px 0 6px">Terminar todo el inventario</div><p class="pie" style="padding:0 0 8px">Cierra la toma cuando ya no se vaya a contar más. Lo contado se copia a la pestaña archivo_conteos antes de abrir otra toma.</p><button class="btn pel ancho" data-a="pedirCerrarToma">Cerrar toma</button>';
     return h + '</div>';
   }
   function adminUsuarios() {
@@ -388,7 +402,7 @@
         dbPut('pos', { unidad: id, info: r.unidad, filas: r.filas, usuario: S.ses.usuario, toma: r.toma });
         pintarChip(); programarFlush(); return r;
       }
-      if (r.error === 'no_tuya' || r.error === 'sin_toma' || r.error === 'no_existe') { CT.perdida = r.mensaje; CT.datos = null; if (S.vista === 'contar') render(); return r; }
+      if (r.error === 'no_tuya' || r.error === 'cerrada' || r.error === 'sin_toma' || r.error === 'no_existe') { CT.perdida = r.mensaje; CT.datos = null; if (S.vista === 'contar') render(); return r; }
       if (r.error === 'red') return cache(r.mensaje);
       S.errCarga = r.mensaje || 'No se pudo cargar.'; if (S.vista === 'contar') render(); return r;
     });
@@ -485,7 +499,7 @@
     var sub = u ? (torre ? 'Modula' : 'Nave ' + u.nave + (u.zona ? ' · ' + u.zona.charAt(0) + u.zona.slice(1).toLowerCase() : '')) : '';
     if (torre && CT.udc) sub = 'UDC ' + CT.udc;
     var cuerpo;
-    if (CT.perdida) cuerpo = '<div class="vacio"><h2>Esta unidad ya no es tuya</h2><p>' + esc(CT.perdida) + '</p>' + (pendientes().filter(function (e) { return e.unidad === S.unidadActual; }).length ? '<p>Lo que contaste sin enviar queda guardado en este celular. Avisa al administrador.</p>' : '') + '<button class="btn rel" data-a="atras">Volver a la lista</button></div>';
+    if (CT.perdida) cuerpo = '<div class="vacio"><h2>' + (/cerrada/.test(CT.perdida) ? 'Esta unidad está cerrada' : 'Esta unidad ya no es tuya') + '</h2><p>' + esc(CT.perdida) + '</p>' + (pendientes().filter(function (e) { return e.unidad === S.unidadActual; }).length ? '<p>Lo que contaste sin enviar queda guardado en este celular. Avisa al administrador.</p>' : '') + '<button class="btn rel" data-a="atras">Volver a la lista</button></div>';
     else if (S.errCarga && !d) cuerpo = cargando();
     else if (!d) cuerpo = cargando();
     else if (torre && !CT.udc) cuerpo = cuerpoUdcs(d);
@@ -499,7 +513,7 @@
       '<ul class="lista">' + orden.map(function (udc) {
         var l = mapa[udc], n = contadas(l), ok = n === l.length;
         return '<li class="u' + (ok ? ' cerrado' : '') + '"><div class="letra torre" aria-hidden="true">' + esc(String(udc).slice(-3)) + '</div><div class="info"><div class="nom">UDC ' + esc(udc) + '</div><div class="det">' + n + ' de ' + l.length + ' posiciones</div></div><button class="btn' + (ok ? ' gr' : ' rel') + '" data-a="udc" data-id="' + esc(udc) + '">' + (ok ? 'Revisar' : (n ? 'Seguir' : 'Contar')) + '</button></li>';
-      }).join('') + '</ul>';
+      }).join('') + '</ul>' + botonCerrar();
   }
   function cuerpoPosiciones(d, torre) {
     var f = alcance(), h = '', ult = null;
@@ -512,7 +526,11 @@
       (camaraDisponible() ? '<div class="barra-esc"><button class="btn gr ancho" data-a="escanear"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8V5a1 1 0 011-1h3M16 4h3a1 1 0 011 1v3M20 16v3a1 1 0 01-1 1h-3M8 20H5a1 1 0 01-1-1v-3M7 12h10"/></svg> Escanear artículo</button></div>' : '') +
       '<div class="seg" role="group"><button data-a="filtro" data-id="todas" aria-pressed="' + (CT.filtro === 'todas') + '">Todas</button><button data-a="filtro" data-id="pend" aria-pressed="' + (CT.filtro === 'pend') + '">Pendientes</button></div>' +
       '<ul class="lista pos-lista' + (CT.filtro === 'pend' ? ' solopend' : '') + '" id="posl">' + h + '</ul>' +
-      '<p class="pie">Se guarda en tu celular al instante y se envía sola. Si una posición está vacía, toca <b>Vacía</b>.</p>';
+      '<p class="pie">Se guarda en tu celular al instante y se envía sola. Si una posición está vacía, toca <b>Vacía</b>.</p>' + (torre ? '' : botonCerrar());
+  }
+  function botonCerrar() {
+    var u = CT.datos && CT.datos.unidad; if (!u) return '';
+    return '<div class="cierre"><button class="btn rel ancho" data-a="pedirCerrar">Terminar y cerrar ' + (u.tipo === 'torre' ? 'torre' : 'pasillo') + '</button></div>';
   }
 
   // ---------- registrar un conteo ----------
@@ -620,7 +638,7 @@
       var cand = enAlc.filter(coincide); cand = cand.filter(function (f) { return !entradaDe(f.id); }).concat(cand);
       if (!cand.length) {
         var otra = todas.filter(coincide)[0];
-        toast(otra && CT.datos.unidad.tipo === 'torre' ? 'El artículo ' + r.a + ' está en la UDC ' + otra.udc + '.' : 'El artículo ' + r.a + ' no está en esta unidad. Si lo encontraste en una posición vacía, usa Registrar producto.');
+        toast(otra && CT.datos.unidad.tipo === 'torre' ? 'El artículo ' + r.a + ' no está en esta UDC.' : 'El artículo ' + r.a + ' no está en esta unidad. Si lo encontraste en una posición vacía, usa Registrar producto.');
         return;
       }
       var li = document.querySelector('li.fc[data-fila="' + cand[0].id + '"]'); if (!li) return;
@@ -658,7 +676,7 @@
               pintarChip(); return 'ok';
             }
             if (r.error === 'toma_distinta') { descartarUnidad(uid); toast('El administrador abrió una toma nueva. Se descartó lo contado antes.'); if (S.vista === 'contar' && S.unidadActual === uid) abrirConteo(uid); return 'otra'; }
-            if (r.error === 'no_tuya' || r.error === 'sin_toma' || r.error === 'no_existe') {
+            if (r.error === 'no_tuya' || r.error === 'cerrada' || r.error === 'sin_toma' || r.error === 'no_existe') {
               SY.bloq[uid] = true; if (S.vista === 'contar' && S.unidadActual === uid) { CT.perdida = r.mensaje; render(); } else toast(r.mensaje);
               return 'otra';
             }
@@ -786,6 +804,67 @@
         cerrarModal(); toast('Unidad liberada.'); cargarUnidades();
       });
     },
+    pedirCerrar: function () {
+      var d = CT.datos, u = d && d.unidad; if (!u) return;
+      var faltan = d.filas.length - contadas(d.filas), nom = u.tipo === 'torre' ? 'la torre ' + u.torre : 'el pasillo ' + u.pasillo;
+      if (faltan > 0) modal('<h3>Faltan ' + faltan + ' posiciones</h3><p>Si cierras ' + nom + ' ahora, esas posiciones quedan sin contar y ya no podrás cambiar nada. Solo el administrador puede reabrirlo.</p><div id="msg"></div><div class="botones"><button class="btn gr" data-a="cerrarModal">Seguir contando</button><button class="btn pel" data-a="cerrarUnidad" data-f="1">Cerrar igual</button></div>');
+      else modal('<h3>¿Cerrar ' + nom + '?</h3><p>Contaste todas las posiciones. Después de cerrar ya no podrás cambiarlas; solo el administrador puede reabrirlo.</p><div id="msg"></div><div class="botones"><button class="btn gr" data-a="cerrarModal">Cancelar</button><button class="btn rel" data-a="cerrarUnidad" data-f="0">Cerrar</button></div>');
+    },
+    cerrarUnidad: function (b) {
+      var id = S.unidadActual, forzar = b.dataset.f === '1'; ocupar(b, 'Enviando…');
+      flush(true).then(function () {
+        if (pendientes().filter(function (e) { return e.unidad === id; }).length) { liberarBoton(b); return mostrarError(null, 'No se pudo enviar todo lo contado. Revisa tu señal e inténtalo de nuevo.'); }
+        return api('cerrarUnidad', { id: id, forzar: forzar }).then(function (r) {
+          if (r.error === 'faltan_posiciones') { liberarBoton(b); return modal('<h3>Faltan ' + r.faltan + ' posiciones</h3><p>El servidor cuenta ' + r.faltan + ' de ' + r.total + ' sin contar. Si cierras ahora quedan sin contar.</p><div id="msg"></div><div class="botones"><button class="btn gr" data-a="cerrarModal">Seguir contando</button><button class="btn pel" data-a="cerrarUnidad" data-f="1">Cerrar igual</button></div>'); }
+          if (!r.ok) { liberarBoton(b); return mostrarError(null, r.mensaje); }
+          cerrarModal(); toast('Unidad cerrada.'); CT.udc = null; CT.datos = null; S.vista = 'home'; render(); cargarSegunVista();
+        });
+      });
+    },
+    pedirCerrarAdm: function (b) {
+      var u = unidadPorId(b.dataset.id);
+      confirmar('Cerrar ' + nombreUnidad(u), 'Lo cierras en nombre de ' + (u && u.operador) + '. Ya no podrá cambiar sus conteos, salvo que la reabras.', 'Cerrar', 'cerrarAdm', b.dataset.id);
+    },
+    cerrarAdm: function (b) {
+      ocupar(b, 'Cerrando…');
+      api('cerrarUnidad', { id: b.dataset.id, forzar: b.dataset.f === '1' }).then(function (r) {
+        if (r.error === 'faltan_posiciones') { liberarBoton(b); return modal('<h3>Faltan ' + r.faltan + ' de ' + r.total + ' posiciones</h3><p>Si la cierras así, esas posiciones quedan sin contar.</p><div id="msg"></div><div class="botones"><button class="btn gr" data-a="cerrarModal">Cancelar</button><button class="btn pel" data-a="cerrarAdm" data-f="1" data-id="' + esc(b.dataset.id) + '">Cerrar igual</button></div>'); }
+        if (!r.ok) { liberarBoton(b); return mostrarError(null, r.mensaje); }
+        cerrarModal(); toast('Unidad cerrada.'); cargarSegunVista();
+      });
+    },
+    pedirReabrir: function (b) {
+      var u = unidadPorId(b.dataset.id);
+      confirmar('Reabrir ' + nombreUnidad(u), 'Vuelve a ' + (u && u.operador) + ' con los conteos como estaban. Escribe el motivo; queda en el historial.', 'Reabrir', 'reabrir', b.dataset.id,
+        '<div class="campo"><label for="mot">Motivo</label><input id="mot" autocomplete="off"></div>');
+    },
+    reabrir: function (b) {
+      var mot = ($capa.querySelector('#mot') || {}).value || ''; ocupar(b, 'Reabriendo…');
+      api('reabrirUnidad', { id: b.dataset.id, motivo: mot }).then(function (r) {
+        if (!r.ok) { liberarBoton(b); return mostrarError(null, r.mensaje); }
+        cerrarModal(); toast('Unidad reabierta.'); cargarSegunVista();
+      });
+    },
+    verCambios: function (b) {
+      api('cambiosUnidad', { id: b.dataset.id }).then(function (r) {
+        if (!r.ok) return toast(r.mensaje);
+        var h = !r.cambios.length ? '<p>Nadie ha corregido posiciones en esta unidad.</p>' : '<div style="max-height:50vh;overflow:auto;margin-bottom:6px">' + r.cambios.map(function (c) {
+          return '<div class="fila" style="padding:8px 0;align-items:flex-start"><div class="info"><div class="nom">UDC ' + esc(c.udc) + ' · ' + esc(c.pos) + '</div>' + c.versiones.map(function (v) {
+            return '<div class="det">' + esc(fecha(v.ts)) + ' · ' + esc(v.usuario) + ': <b>' + (v.vacia ? 'Vacía' : v.cantidad) + '</b>' + (v.obs ? ' · ' + esc(v.obs) : '') + '</div>'; }).join('') + '</div></div>'; }).join('') + '</div>';
+        modal('<h3>Cambios · ' + esc(r.unidad) + '</h3><p>' + (r.total ? r.total + ' posición(es) corregida(s). Se muestran todas las versiones, de la primera a la última.' : 'Sin correcciones.') + '</p>' + h + '<div class="botones"><button class="btn rel" data-a="cerrarModal">Listo</button></div>');
+      });
+    },
+    pedirCerrarToma: function () {
+      confirmar('¿Cerrar la toma?', 'Nadie podrá seguir contando. Si quieres sumar más pasillos sin parar a nadie, usa Agregar a la toma. Lo contado se conserva hasta que abras la siguiente toma y se copia a archivo_conteos.', 'Cerrar toma', 'cerrarToma');
+    },
+    cerrarToma: function (b) {
+      ocupar(b, 'Cerrando…');
+      api('cerrarToma', { forzar: b.dataset.f === '1' }).then(function (r) {
+        if (r.error === 'hay_en_conteo') { liberarBoton(b); return modal('<h3>Hay ' + r.cantidad + ' unidad(es) en conteo</h3><p>' + r.en_conteo.map(function (x) { return esc(x.nombre) + ' (' + esc(x.operador) + ')'; }).join(', ') + '. Si cierras la toma, esos contadores no podrán enviar más conteos.</p><div id="msg"></div><div class="botones"><button class="btn gr" data-a="cerrarModal">Cancelar</button><button class="btn pel" data-a="cerrarToma" data-f="1">Cerrar igual</button></div>'); }
+        if (!r.ok) { liberarBoton(b); return mostrarError(null, r.mensaje); }
+        cerrarModal(); toast('Toma cerrada.'); S.datos = null; S.av = null; S.informe = null; S.adminTab = 'carga'; render(); cargarUnidades();
+      });
+    },
     validar: function () {
       S.ocupado = true; S.informe = null; render();
       api('validarDatos').then(function (r) {
@@ -802,6 +881,17 @@
       api('abrirToma').then(function (r) {
         if (!r.ok) { liberarBoton(b); return mostrarError(null, r.mensaje); }
         cerrarModal(); S.informe = null; toast('Toma abierta: ' + r.unidades + ' unidades.'); S.adminTab = 'avance'; S.datos = null; render(); cargarUnidades();
+      });
+    },
+    pedirAgregar: function () {
+      var pv = S.informe && S.informe.previa; if (!pv) return;
+      confirmar('¿Agregar a la toma?', pv.nuevas + ' unidades nuevas (' + pv.filas_nuevas + ' posiciones)' + (pv.actualizar ? ' y ' + pv.actualizar + ' pendientes actualizadas' : '') + '. Los contadores que ya están contando no pierden nada.', 'Agregar', 'agregar');
+    },
+    agregar: function (b) {
+      ocupar(b, 'Agregando…');
+      api('agregarAToma').then(function (r) {
+        if (!r.ok) { liberarBoton(b); return mostrarError(null, r.mensaje); }
+        cerrarModal(); S.informe = null; toast(r.sin_cambios ? 'No había nada nuevo.' : 'Agregadas ' + r.nuevas + ' unidades' + (r.actualizadas ? ' y actualizadas ' + r.actualizadas : '') + '.'); S.adminTab = 'avance'; S.datos = null; render(); cargarUnidades(); cargarSegunVista();
       });
     },
     nuevoUsuario: function () {
